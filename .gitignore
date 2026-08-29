@@ -1,0 +1,9 @@
+node_modules/
+packages/*/dist/
+dist/
+coverage/
+*.vsix
+*.log
+.DS_Store
+Thumbs.db
+

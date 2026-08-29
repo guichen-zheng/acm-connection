@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "port": 27121,
+  "solutionRoot": ".",
+  "defaultLanguage": "cpp",
+  "siteDirectories": {
+    "luogu": "luogu",
+    "nowcoder": "nowcoder",
+    "leetcode": "leetcode",
+    "ybt": "ybt"
+  }
+}
