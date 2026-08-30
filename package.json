@@ -1,6 +1,6 @@
 {
   "name": "algo-sync-workspace",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Workspace-scoped synchronization between online judge editors and VS Code.",
   "workspaces": [
@@ -11,7 +11,8 @@
     "clean": "npm run clean --workspaces --if-present",
     "test": "vitest run",
     "test:watch": "vitest",
-    "package:vscode": "npm run package:vsix --workspace algo-sync-vscode-extension"
+    "package:vscode": "npm run package:vsix --workspace algo-sync-vscode-extension",
+    "install:cli": "node scripts/install-cli.mjs"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^28.0.0",

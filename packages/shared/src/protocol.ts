@@ -1,6 +1,7 @@
-export const PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 3 as const;
 export const DEFAULT_PORT = 27121;
 export const BROWSER_EXTENSION_ID = "bpbicpjghnomlgogenedfkflejaggmfo";
+export const CLI_ORIGIN = "algo-sync-cli://local";
 
 export const SITES = ["luogu", "nowcoder", "leetcode", "ybt"] as const;
 export type Site = (typeof SITES)[number];
@@ -25,6 +26,7 @@ export interface ProblemContext {
   url: string;
   language: Language;
   code: string;
+  statementMarkdown?: string;
 }
 
 export interface HelloMessage {
@@ -74,6 +76,48 @@ export interface ApplyResultMessage {
   message?: string;
 }
 
+export type SubmissionPhase = "preparing" | "submitted" | "judging" | "finished" | "error";
+
+export interface SubmitCodeMessage {
+  type: "submitCode";
+  protocolVersion: number;
+  requestId: string;
+  tabId: number;
+  site: Site;
+  problemId: string;
+  language: Language;
+  code: string;
+}
+
+export interface SubmissionUpdateMessage {
+  type: "submissionUpdate";
+  protocolVersion: number;
+  requestId: string;
+  tabId: number;
+  phase: SubmissionPhase;
+  status: string;
+  success?: boolean;
+}
+
+export interface CliPushMessage {
+  type: "cliPush";
+  protocolVersion: number;
+  requestId: string;
+  cwd: string;
+}
+
+export interface CliUpdateMessage {
+  type: "cliUpdate";
+  protocolVersion: number;
+  requestId: string;
+  phase: SubmissionPhase;
+  status: string;
+  site?: Site;
+  problemId?: string;
+  language?: Language;
+  success?: boolean;
+}
+
 export interface ErrorMessage {
   type: "error";
   protocolVersion: number;
@@ -90,14 +134,19 @@ export type BrowserToWorkspaceMessage =
   | HelloMessage
   | ActiveEditorChangedMessage
   | ApplyResultMessage
+  | SubmissionUpdateMessage
   | PingMessage;
 
 export type WorkspaceToBrowserMessage =
   | ReadyMessage
   | LocalFileReadyMessage
   | SavedCodeMessage
+  | SubmitCodeMessage
   | ErrorMessage
   | PingMessage;
+
+export type CliToWorkspaceMessage = CliPushMessage | PingMessage;
+export type WorkspaceToCliMessage = CliUpdateMessage | ErrorMessage | PingMessage;
 
 export function isSite(value: unknown): value is Site {
   return typeof value === "string" && (SITES as readonly string[]).includes(value);
@@ -116,7 +165,9 @@ export function isProblemContext(value: unknown): value is ProblemContext {
     isHttpUrl(value.url) &&
     isLanguage(value.language) &&
     typeof value.code === "string" &&
-    value.code.length <= 2_000_000
+    value.code.length <= 2_000_000 &&
+    (value.statementMarkdown === undefined ||
+      (typeof value.statementMarkdown === "string" && value.statementMarkdown.length <= 1_000_000))
   );
 }
 
@@ -140,6 +191,23 @@ export function parseBrowserMessage(raw: unknown): BrowserToWorkspaceMessage | u
       ? (raw as unknown as ApplyResultMessage)
       : undefined;
   }
+  if (raw.type === "submissionUpdate") {
+    return isRequestId(raw.requestId) && Number.isInteger(raw.tabId) && isSubmissionPhase(raw.phase) &&
+      isBoundedText(raw.status, 2_000) && (raw.success === undefined || typeof raw.success === "boolean")
+      ? (raw as unknown as SubmissionUpdateMessage)
+      : undefined;
+  }
+  if (raw.type === "ping" || raw.type === "pong") return raw as unknown as PingMessage;
+  return undefined;
+}
+
+export function parseCliMessage(raw: unknown): CliToWorkspaceMessage | undefined {
+  if (!isRecord(raw) || raw.protocolVersion !== PROTOCOL_VERSION || typeof raw.type !== "string") return undefined;
+  if (raw.type === "cliPush") {
+    return isRequestId(raw.requestId) && isBoundedText(raw.cwd, 4_096)
+      ? (raw as unknown as CliPushMessage)
+      : undefined;
+  }
   if (raw.type === "ping" || raw.type === "pong") return raw as unknown as PingMessage;
   return undefined;
 }
@@ -154,6 +222,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isSafeText(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= maxLength;
+}
+
+function isBoundedText(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+}
+
+function isRequestId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f-]{16,64}$/i.test(value);
+}
+
+function isSubmissionPhase(value: unknown): value is SubmissionPhase {
+  return value === "preparing" || value === "submitted" || value === "judging" ||
+    value === "finished" || value === "error";
 }
 
 function isHttpUrl(value: unknown): value is string {

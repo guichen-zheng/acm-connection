@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { existingFilePrefix, normalizeRelativeDirectory, sameFile, shouldSyncSavedFile, solutionFilename } from "./core";
+import {
+  GENERATED_END,
+  GENERATED_START,
+  existingFilePrefix,
+  mergeStatementMarkdown,
+  normalizeRelativeDirectory,
+  problemDirectoryName,
+  sameFile,
+  shouldSyncSavedFile,
+  solutionFilename
+} from "./core";
 
 describe("workspace file rules", () => {
   it("sanitizes a Windows-incompatible title", () => {
@@ -8,6 +18,70 @@ describe("workspace file rules", () => {
 
   it("uses stable problem identifiers as the lookup prefix", () => {
     expect(existingFilePrefix("P1002")).toBe("P1002-");
+    expect(problemDirectoryName("P1002", "A/B: C?*")).toBe("P1002-A-B- C-");
+  });
+
+  it.each([
+    ["cpp", ".cpp"],
+    ["c", ".c"],
+    ["python", ".py"],
+    ["java", ".java"],
+    ["javascript", ".js"],
+    ["go", ".go"],
+    ["rust", ".rs"]
+  ] as const)("places %s solutions in the same problem directory", (language, extension) => {
+    expect(problemDirectoryName("P1002", "过河卒")).toBe("P1002-过河卒");
+    expect(solutionFilename("P1002", "过河卒", language)).toBe(`P1002-过河卒${extension}`);
+  });
+
+  it("updates only the generated statement region", () => {
+    const context = {
+      site: "luogu" as const,
+      problemId: "P1002",
+      title: "过河卒",
+      url: "https://www.luogu.com.cn/problem/P1002",
+      language: "cpp" as const,
+      code: "",
+      statementMarkdown: "## 题目描述\n\n新版题面"
+    };
+    const first = mergeStatementMarkdown("", context);
+    const withNotes = `${first}\n## 个人笔记\n\n我的笔记：动态规划`;
+    const updated = mergeStatementMarkdown(withNotes, { ...context, statementMarkdown: "## 题目描述\n\n再次更新" });
+    expect(updated).toContain("再次更新");
+    expect(updated).not.toContain("新版题面");
+    expect(updated).toContain("我的笔记：动态规划");
+    expect(updated).not.toContain("## 个人笔记");
+    expect(updated.match(new RegExp(GENERATED_START, "g"))).toHaveLength(1);
+    expect(updated.match(new RegExp(GENERATED_END, "g"))).toHaveLength(1);
+  });
+
+  it("preserves an unmarked existing Markdown file", () => {
+    const merged = mergeStatementMarkdown("旧笔记，不可覆盖", {
+      site: "nowcoder",
+      problemId: "NC1",
+      title: "测试",
+      url: "https://ac.nowcoder.com/acm/problem/1",
+      language: "cpp",
+      code: "",
+      statementMarkdown: "题面"
+    });
+    expect(merged).toContain("题面");
+    expect(merged).toContain("旧笔记，不可覆盖");
+    expect(merged).not.toContain("## 个人笔记");
+  });
+
+  it("does not add a personal notes section to new statements", () => {
+    const merged = mergeStatementMarkdown("", {
+      site: "leetcode",
+      problemId: "1",
+      title: "两数之和",
+      url: "https://leetcode.cn/problems/two-sum/",
+      language: "cpp",
+      code: "",
+      statementMarkdown: "题面"
+    });
+    expect(merged).not.toContain("个人笔记");
+    expect(merged.endsWith("\n")).toBe(true);
   });
 
   it("rejects absolute and escaping directories", () => {
@@ -20,9 +94,10 @@ describe("workspace file rules", () => {
   });
 
   it("filters Save All down to the single active browser target", () => {
-    const active = "C:\\work\\luogu\\P1002-过河卒.cpp";
+    const active = "C:\\work\\luogu\\P1002-过河卒\\P1002-过河卒.cpp";
     expect(shouldSyncSavedFile(active, active, "win32")).toBe(true);
-    expect(shouldSyncSavedFile("C:\\work\\luogu\\P1003-铺地毯.cpp", active, "win32")).toBe(false);
+    expect(shouldSyncSavedFile("C:\\work\\luogu\\P1003-铺地毯\\P1003-铺地毯.cpp", active, "win32")).toBe(false);
+    expect(shouldSyncSavedFile("C:\\work\\luogu\\P1002-过河卒\\题目.md", active, "win32")).toBe(false);
     expect(shouldSyncSavedFile(active, undefined, "win32")).toBe(false);
   });
 });

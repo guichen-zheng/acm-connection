@@ -41,7 +41,9 @@ export function detectProblem(locationUrl = window.location.href, doc = document
     return identity("luogu", match[1], titleFrom(doc, ["h1", ".lfe-h1", "title"], match[1]), url);
   }
   if (url.hostname === "ac.nowcoder.com") {
-    const match = url.pathname.match(/^\/acm\/problem\/([^/?#]+)/);
+    // ACM problem pages use a numeric route segment. Keep the match exact so
+    // collection pages such as /acm/problem/list are never treated as problems.
+    const match = url.pathname.match(/^\/acm\/problem\/(\d+)\/?$/);
     if (!match) return undefined;
     const displayedId = (doc.body.textContent ?? "").match(/题号\s*[:：]\s*([A-Z]{1,8}\d+)/i)?.[1];
     return identity(

@@ -1,4 +1,11 @@
-import { PROTOCOL_VERSION, problemKey, type Language, type ProblemContext } from "@algo-sync/shared";
+import {
+  PROTOCOL_VERSION,
+  problemKey,
+  type Language,
+  type ProblemContext,
+  type Site,
+  type SubmissionPhase
+} from "@algo-sync/shared";
 import {
   canCreateWithoutReadableEditor,
   detectLanguage,
@@ -8,6 +15,13 @@ import {
   normalizeLanguage,
   switchLanguage
 } from "./adapters";
+import { extractStatementMarkdown } from "./statement";
+import {
+  findConfirmationControl,
+  findSubmitControl,
+  readSubmissionStatus,
+  type SubmissionStatus
+} from "./submission";
 
 interface BridgeResponse {
   ok: boolean;
@@ -25,6 +39,7 @@ let scanTimer: number | undefined;
 let workspaceEnabled = false;
 let defaultLanguage: Language = "cpp";
 let lastDiagnostic = "";
+const submissionWatchers = new Set<string>();
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "requestContext") {
@@ -46,6 +61,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "applyCode") {
     void applyCode(message).then(sendResponse);
     return true;
+  }
+  if (message?.type === "submitCode") {
+    sendResponse({ ok: true });
+    void submitCode(message);
+    return false;
+  }
+  if (message?.type === "resumeSubmission" && typeof message.requestId === "string" &&
+    (message.site === "luogu" || message.site === "nowcoder" || message.site === "leetcode" || message.site === "ybt")) {
+    sendResponse({ ok: true });
+    void watchSubmission(message.requestId, message.site);
+    return false;
   }
   return false;
 });
@@ -118,15 +144,26 @@ async function scan(): Promise<void> {
     diagnostic("未识别编程语言", document.body.innerText.slice(0, 300));
     return;
   }
-  const context: ProblemContext = { ...identity, language, code: editorCode };
+  const statementMarkdown = extractStatementMarkdown(identity.site);
+  const context: ProblemContext = { ...identity, language, code: editorCode, statementMarkdown };
   const key = problemKey(context);
-  if (key === lastReportedKey) return;
-  lastReportedKey = key;
+  const reportKey = `${key}:${hashText(statementMarkdown ?? "")}`;
+  if (reportKey === lastReportedKey) return;
+  lastReportedKey = reportKey;
   diagnostic(
     "已识别并发送题目",
     `${key}，编辑器=${editor.editor ?? editor.message ?? "空白兜底"}，网页语言=${editor.language ?? "DOM/默认值"}`
   );
   await chrome.runtime.sendMessage({ type: "contextDetected", protocolVersion: PROTOCOL_VERSION, context });
+}
+
+function hashText(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
 }
 
 function diagnostic(stage: string, detail: string): void {
@@ -164,6 +201,85 @@ async function applyCode(message: {
   return { ok: result.ok, message: result.message };
 }
 
+async function submitCode(message: {
+  requestId: string;
+  site: Site;
+  problemId: string;
+  language: Language;
+  code: string;
+}): Promise<void> {
+  await emitSubmissionUpdate(message.requestId, "preparing", "正在把本地代码写入网页编辑器");
+  const applied = await applyCode(message);
+  if (!applied.ok) {
+    await emitSubmissionUpdate(message.requestId, "error", applied.message ?? "代码写入网页失败", false);
+    return;
+  }
+  const identity = detectProblem();
+  if (!identity || identity.site !== message.site || identity.problemId !== message.problemId) {
+    await emitSubmissionUpdate(message.requestId, "error", "提交前网页题目已经改变", false);
+    return;
+  }
+  const baseline = readSubmissionStatus(message.site);
+  const control = findSubmitControl(message.site);
+  if (!control) {
+    await emitSubmissionUpdate(message.requestId, "error", "没有找到当前网站的提交按钮，请确认已登录且提交区域可见", false);
+    return;
+  }
+  control.click();
+  await delay(350);
+  findConfirmationControl()?.click();
+  await emitSubmissionUpdate(message.requestId, "submitted", "代码已提交，正在等待评测结果");
+  await watchSubmission(message.requestId, message.site, baseline, location.href);
+}
+
+async function watchSubmission(
+  requestId: string,
+  site: Site,
+  baseline?: SubmissionStatus,
+  initialUrl = location.href
+): Promise<void> {
+  if (submissionWatchers.has(requestId)) return;
+  submissionWatchers.add(requestId);
+  const startedAt = Date.now();
+  const baselineKey = baseline ? `${baseline.phase}:${baseline.status}` : "";
+  let sawTransition = baseline === undefined;
+  let lastStatus = "";
+  try {
+    while (Date.now() - startedAt < 10 * 60_000) {
+      await delay(750);
+      const result = readSubmissionStatus(site);
+      if (!result) continue;
+      const key = `${result.phase}:${result.status}`;
+      if (location.href !== initialUrl || key !== baselineKey) sawTransition = true;
+      if (result.phase === "judging") sawTransition = true;
+      if (key !== lastStatus && (sawTransition || result.phase === "judging")) {
+        lastStatus = key;
+        await emitSubmissionUpdate(requestId, result.phase, result.status, result.success);
+      }
+      if (result.phase === "finished" && (sawTransition || Date.now() - startedAt > 8_000)) return;
+    }
+    await emitSubmissionUpdate(requestId, "error", "等待评测结果超时，请在网站提交记录中查看", false);
+  } finally {
+    submissionWatchers.delete(requestId);
+  }
+}
+
+async function emitSubmissionUpdate(
+  requestId: string,
+  phase: SubmissionPhase,
+  status: string,
+  success?: boolean
+): Promise<void> {
+  await chrome.runtime.sendMessage({
+    type: "submissionUpdate",
+    protocolVersion: PROTOCOL_VERSION,
+    requestId,
+    phase,
+    status,
+    success
+  }).catch(() => undefined);
+}
+
 function bridgeRequest(action: "read" | "write", code?: string): Promise<BridgeResponse> {
   if (!bridgeToken) return Promise.resolve({ ok: false, message: "编辑器桥接尚未初始化" });
   const requestId = crypto.randomUUID();
@@ -182,4 +298,8 @@ function bridgeRequest(action: "read" | "write", code?: string): Promise<BridgeR
     window.addEventListener("message", listener);
     window.postMessage({ source: "algo-sync-content", token: bridgeToken, requestId, action, code }, "*");
   });
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }

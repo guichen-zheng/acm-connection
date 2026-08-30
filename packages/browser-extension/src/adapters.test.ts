@@ -34,6 +34,15 @@ describe("site adapters", () => {
   });
 
   it.each([
+    "https://ac.nowcoder.com/acm/problem/list",
+    "https://ac.nowcoder.com/acm/problem/list?from=acm",
+    "https://ac.nowcoder.com/acm/problem/"
+  ])("does not recognize the Nowcoder problem collection page %s", (url) => {
+    document.title = "竞赛题库_ACM/NOI/CSP基础提高训练专区";
+    expect(detectProblem(url)).toBeUndefined();
+  });
+
+  it.each([
     ["GNU C++17", "cpp"], ["C++（clang++18）", "cpp"], ["C", "c"], ["Python3", "python"], ["Java 17", "java"],
     ["Node.js", "javascript"], ["Golang", "go"], ["Rust 1.70", "rust"]
   ])("normalizes %s", (label, expected) => {

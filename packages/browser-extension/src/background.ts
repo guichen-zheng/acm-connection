@@ -5,6 +5,7 @@ import {
   isSite,
   problemKey,
   type ProblemContext,
+  type Site,
   type WorkspaceToBrowserMessage
 } from "@algo-sync/shared";
 import { mainBridgeBootstrap } from "./main-bridge";
@@ -12,9 +13,16 @@ import { mainBridgeBootstrap } from "./main-bridge";
 interface TabState {
   context: ProblemContext;
   fingerprint: string;
+  announcementKey: string;
+}
+
+interface PendingBrowserSubmission {
+  requestId: string;
+  site: Site;
 }
 
 const tabs = new Map<number, TabState>();
+const pendingSubmissions = new Map<number, PendingBrowserSubmission>();
 let activeTabId: number | undefined;
 let socket: WebSocket | undefined;
 let connectedPort: number | undefined;
@@ -47,7 +55,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "contextDetected" && sender.tab?.id !== undefined && isProblemContextLike(message.context)) {
     const tabId = sender.tab.id;
     const context = message.context as ProblemContext;
-    tabs.set(tabId, { context, fingerprint: problemKey(context) });
+    tabs.set(tabId, {
+      context,
+      fingerprint: problemKey(context),
+      announcementKey: `${problemKey(context)}:${hashText(context.statementMarkdown ?? "")}`
+    });
     if (sender.tab.active) {
       activeTabId = tabId;
       announceActiveContext();
@@ -63,6 +75,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ok: message.ok === true,
       message: typeof message.message === "string" ? message.message : undefined
     });
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (message?.type === "submissionUpdate" && sender.tab?.id !== undefined &&
+    typeof message.requestId === "string" && pendingSubmissions.get(sender.tab.id)?.requestId === message.requestId) {
+    sendSocket({
+      type: "submissionUpdate",
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: message.requestId,
+      tabId: sender.tab.id,
+      phase: message.phase,
+      status: message.status,
+      success: message.success
+    });
+    if (message.phase === "finished" || message.phase === "error") pendingSubmissions.delete(sender.tab.id);
     sendResponse({ ok: true });
     return false;
   }
@@ -82,9 +109,30 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     lastSentFingerprint = "";
     void chrome.tabs.sendMessage(tabId, { type: "requestContext" }).catch(() => undefined);
   }
+  if (changeInfo.status === "complete") {
+    const pending = pendingSubmissions.get(tabId);
+    if (pending) void chrome.tabs.sendMessage(tabId, {
+      type: "resumeSubmission",
+      requestId: pending.requestId,
+      site: pending.site
+    }).catch(() => undefined);
+  }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabs.delete(tabId);
+  const pending = pendingSubmissions.get(tabId);
+  if (pending) {
+    sendSocket({
+      type: "submissionUpdate",
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: pending.requestId,
+      tabId,
+      phase: "error",
+      status: "评测完成前浏览器标签页已关闭",
+      success: false
+    });
+    pendingSubmissions.delete(tabId);
+  }
   if (activeTabId === tabId) {
     activeTabId = undefined;
     lastSentFingerprint = "";
@@ -170,6 +218,48 @@ function handleWorkspaceMessage(raw: unknown): void {
     });
     return;
   }
+  if (message.type === "submitCode") {
+    const state = tabs.get(message.tabId);
+    if (!state || state.fingerprint !== problemKey(message)) {
+      sendSocket({
+        type: "submissionUpdate",
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: message.requestId,
+        tabId: message.tabId,
+        phase: "error",
+        status: "活动网页题目或语言已经改变",
+        success: false
+      });
+      return;
+    }
+    const previous = pendingSubmissions.get(message.tabId);
+    if (previous && previous.requestId !== message.requestId) {
+      sendSocket({
+        type: "submissionUpdate",
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: message.requestId,
+        tabId: message.tabId,
+        phase: "error",
+        status: "当前标签页已有一个提交正在等待评测",
+        success: false
+      });
+      return;
+    }
+    pendingSubmissions.set(message.tabId, { requestId: message.requestId, site: message.site });
+    void chrome.tabs.sendMessage(message.tabId, { ...message, type: "submitCode" }).catch((error) => {
+      pendingSubmissions.delete(message.tabId);
+      sendSocket({
+        type: "submissionUpdate",
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: message.requestId,
+        tabId: message.tabId,
+        phase: "error",
+        status: String(error),
+        success: false
+      });
+    });
+    return;
+  }
   if (message.type === "error") setBadge("!", "#cf222e", message.message);
 }
 
@@ -177,7 +267,7 @@ function announceActiveContext(): void {
   if (activeTabId === undefined || socket?.readyState !== WebSocket.OPEN) return;
   const state = tabs.get(activeTabId);
   if (!state) return;
-  const fingerprint = `${activeTabId}:${state.fingerprint}`;
+  const fingerprint = `${activeTabId}:${state.announcementKey}`;
   if (fingerprint === lastSentFingerprint) return;
   lastSentFingerprint = fingerprint;
   console.info(`[Algo Sync] 活动题目：${state.fingerprint}（标签 ${activeTabId}）`);
@@ -187,6 +277,15 @@ function announceActiveContext(): void {
     tabId: activeTabId,
     context: state.context
   });
+}
+
+function hashText(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
 }
 
 async function refreshActiveTab(): Promise<void> {
@@ -223,7 +322,9 @@ function isProblemContextLike(value: unknown): boolean {
   const context = value as Record<string, unknown>;
   return isSite(context.site) && typeof context.problemId === "string" && context.problemId.length > 0 &&
     typeof context.title === "string" && typeof context.url === "string" && isLanguage(context.language) &&
-    typeof context.code === "string" && context.code.length <= 2_000_000;
+    typeof context.code === "string" && context.code.length <= 2_000_000 &&
+    (context.statementMarkdown === undefined ||
+      (typeof context.statementMarkdown === "string" && context.statementMarkdown.length <= 1_000_000));
 }
 
 setInterval(() => {

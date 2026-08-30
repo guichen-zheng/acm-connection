@@ -3,6 +3,7 @@
   "port": 27121,
   "solutionRoot": ".",
   "defaultLanguage": "cpp",
+  "statementPreview": true,
   "siteDirectories": {
     "luogu": "luogu",
     "nowcoder": "nowcoder",
