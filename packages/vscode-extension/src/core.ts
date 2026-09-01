@@ -69,6 +69,20 @@ export function isStatementPreviewTab(viewType: string, label: string): boolean 
   return /markdown.*preview/i.test(viewType) && normalizedLabel.includes(STATEMENT_FILENAME);
 }
 
+export function preferredSolutionColumn(
+  statementPreview: boolean,
+  matchingColumns: readonly number[],
+  previousColumns: readonly number[]
+): number | undefined {
+  // When the statement layout is enabled, column one is reserved for the
+  // statement source and preview. Always put solutions in the group directly
+  // beside it instead of trusting group numbers captured before VS Code closes
+  // and renumbers empty groups.
+  if (statementPreview) return 2;
+  return matchingColumns.find((column) => column !== 1) ??
+    previousColumns.find((column) => column !== 1);
+}
+
 export function resolveInitialTemplate(
   browserTemplate: string | undefined,
   site: Site

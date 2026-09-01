@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import {
+  findLuoguProblemIdeLinkInPage,
   isMarkedFetchTabUrl,
   isPotentialProblemUrl,
+  luoguIdeUrlForProblem,
+  luoguRecordId,
   markFetchTabUrl,
   problemCodeMatchesContext,
   problemDestination,
@@ -46,6 +49,37 @@ describe("problem navigation", () => {
     expect(url).toBe("https://www.luogu.com.cn/problem/P1001?algo_sync_fetch=1#ide");
     expect(isMarkedFetchTabUrl(url)).toBe(true);
     expect(isMarkedFetchTabUrl("https://www.luogu.com.cn/problem/P1001#ide")).toBe(false);
+  });
+
+  it("returns the same Luogu problem to IDE mode without losing the fetch marker", () => {
+    expect(luoguIdeUrlForProblem(
+      "https://www.luogu.com.cn/problem/P1001?algo_sync_fetch=1",
+      "P1001"
+    )).toBe("https://www.luogu.com.cn/problem/P1001?algo_sync_fetch=1#ide");
+    expect(luoguIdeUrlForProblem("https://www.luogu.com.cn/problem/P1001#ide", "p1001"))
+      .toBe("https://www.luogu.com.cn/problem/P1001#ide");
+  });
+
+  it("refuses to enter IDE mode for a different Luogu problem or host", () => {
+    expect(luoguIdeUrlForProblem("https://www.luogu.com.cn/problem/P1002", "P1001")).toBeUndefined();
+    expect(luoguIdeUrlForProblem("https://example.com/problem/P1001", "P1001")).toBeUndefined();
+  });
+
+  it("recognizes only Luogu submission record pages", () => {
+    expect(luoguRecordId("https://www.luogu.com.cn/record/296291030")).toBe("296291030");
+    expect(luoguRecordId("https://www.luogu.com.cn/record/296291030/?from=submit")).toBe("296291030");
+    expect(luoguRecordId("https://www.luogu.com.cn/problem/P1001#ide")).toBeUndefined();
+    expect(luoguRecordId("https://example.com/record/296291030")).toBeUndefined();
+  });
+
+  it("recovers the exact problem IDE link from an already-open Luogu record page", () => {
+    document.body.innerHTML = `
+      <a href="https://www.luogu.com.cn/problem/P1002">another record</a>
+      <a href="https://www.luogu.com.cn/problem/P1001">P1001 A+B Problem</a>
+    `;
+    expect(findLuoguProblemIdeLinkInPage("p1001"))
+      .toBe("https://www.luogu.com.cn/problem/P1001#ide");
+    expect(findLuoguProblemIdeLinkInPage("P9999")).toBeUndefined();
   });
 
   it.each([

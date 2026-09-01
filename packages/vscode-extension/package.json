@@ -2,7 +2,7 @@
   "name": "algo-sync-vscode-extension",
   "displayName": "Algo Sync Workspace",
   "description": "Workspace-scoped synchronization with supported online judge editors.",
-  "version": "0.6.20",
+  "version": "1.0.0",
   "publisher": "local-algo-sync",
   "private": true,
   "license": "MIT",
@@ -39,7 +39,7 @@
     "package:vsix": "npm run build && vsce package --no-dependencies --allow-missing-repository --out ../../dist/algo-sync-vscode.vsix"
   },
   "dependencies": {
-    "@algo-sync/shared": "0.6.20",
+    "@algo-sync/shared": "1.0.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

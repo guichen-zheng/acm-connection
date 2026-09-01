@@ -14,7 +14,7 @@ import {
 import { formatUpdate, isFinalUpdate, normalizeSwitchLanguage } from "./core";
 import { cleanSiteDirectories, normalizeProblemCode } from "./workspace";
 
-const CLI_VERSION = "0.6.20";
+const CLI_VERSION = "1.0.0";
 const args = process.argv.slice(2);
 
 void main().catch((error) => {

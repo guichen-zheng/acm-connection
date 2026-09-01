@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  activateSubmissionControl,
   classifySubmissionStatus,
+  findNowcoderPostSubmissionDismissControl,
   findSubmitControl,
   isCaptchaChallengePresent,
   observeSubmissionTransition,
@@ -37,11 +39,55 @@ describe("submission adapter", () => {
     expect(findSubmitControl("nowcoder")?.classList.contains("btn-submit")).toBe(true);
   });
 
+  it("uses Nowcoder's relocated visible submit button after the result panel opens", () => {
+    document.body.innerHTML = `
+      <div class="workbench"><button id="old" class="btn-submit">保存并提交</button></div>
+      <div class="sticky-actions"><button id="current" class="btn-submit">保存并提交</button></div>`;
+    const rect = (left: number, top: number) => ({
+      x: left, y: top, left, top, width: 100, height: 40,
+      right: left + 100, bottom: top + 40, toJSON: () => ({})
+    } as DOMRect);
+    document.querySelector<HTMLElement>("#old")!.getBoundingClientRect = () => rect(20, 100);
+    document.querySelector<HTMLElement>("#current")!.getBoundingClientRect = () => rect(800, 650);
+    expect(findSubmitControl("nowcoder")?.id).toBe("current");
+  });
+
   it("ignores a submit control inside a hidden ancestor", () => {
     document.body.innerHTML = `
       <div style="display:none"><button class="btn-submit">保存并提交</button></div>
       <div class="workbench"><button class="btn-submit">保存并提交</button></div>`;
     expect(findSubmitControl("nowcoder")?.closest(".workbench")).not.toBeNull();
+  });
+
+  it("finds Nowcoder's close button in the accepted-submission rating dialog", () => {
+    document.body.innerHTML = `
+      <div class="nc-modal">
+        <header>恭喜通过本题</header>
+        <p>恭喜你AC本题！</p>
+        <footer><button class="cancel">关闭</button><button>确定</button></footer>
+      </div>`;
+    expect(findNowcoderPostSubmissionDismissControl()?.textContent).toBe("关闭");
+  });
+
+  it("activates Nowcoder's close button with pointer and mouse events", () => {
+    document.body.innerHTML = `
+      <div class="nc-modal">
+        <header>恭喜通过本题</header>
+        <button class="close">关闭</button>
+      </div>`;
+    const events: string[] = [];
+    const button = findNowcoderPostSubmissionDismissControl()!;
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      button.addEventListener(type, () => events.push(type));
+    }
+    activateSubmissionControl(button);
+    expect(events).toEqual(["pointerdown", "mousedown", "pointerup", "mouseup", "click"]);
+  });
+
+  it("does not dismiss an ordinary Nowcoder confirmation dialog", () => {
+    document.body.innerHTML = `
+      <div role="dialog"><p>确认提交代码吗？</p><button>关闭</button><button>确定</button></div>`;
+    expect(findNowcoderPostSubmissionDismissControl()).toBeUndefined();
   });
 
   it("finds a Luogu custom action rendered as a link", () => {
@@ -79,11 +125,74 @@ describe("submission adapter", () => {
     expect(readSubmissionStatus("leetcode")).toMatchObject({ phase: "finished", success: false });
   });
 
+  it("returns LeetCode compilation success with runtime and memory", () => {
+    document.body.innerHTML = `
+      <div data-e2e-locator="console-result">
+        <strong>通过</strong>
+        <span>执行用时：3 ms</span><span>内存消耗：18.2 MB</span>
+      </div>`;
+    expect(readSubmissionStatus("leetcode")).toEqual({
+      phase: "finished",
+      status: "通过\n编译成功 · 执行用时 3ms · 内存消耗 18.2MB",
+      success: true
+    });
+  });
+
+  it("reads LeetCode success metrics from distribution cards outside the result", () => {
+    document.body.innerHTML = `
+      <div data-e2e-locator="console-result"><strong>通过</strong></div>
+      <section><h3>执行用时分布</h3><span>0 ms</span><span>击败 100.00%</span></section>
+      <section><h3>消耗内存分布</h3><span>17.05 MB</span><span>击败 99.37%</span></section>`;
+    expect(readSubmissionStatus("leetcode")).toEqual({
+      phase: "finished",
+      status: "通过\n编译成功 · 执行用时 0ms · 内存消耗 17.05MB",
+      success: true
+    });
+  });
+
+  it("returns LeetCode compiler diagnostics", () => {
+    document.body.innerHTML = `
+      <div data-e2e-locator="console-result">
+        <h3>编译出错</h3>
+        <pre>Line 7: Char 5: error: use of undeclared identifier 'answer'</pre>
+      </div>`;
+    expect(readSubmissionStatus("leetcode")).toEqual({
+      phase: "finished",
+      status: "CE Compilation Error\nLine 7: Char 5: error: use of undeclared identifier 'answer'",
+      success: false,
+      allAccepted: false
+    });
+  });
+
+  it("returns LeetCode wrong-answer testcase details", () => {
+    document.body.innerHTML = `
+      <div data-e2e-locator="console-result">
+        <strong>错误解答</strong>
+        <pre>输入\nnums = [1,2]\n输出\n1\n预期结果\n2</pre>
+      </div>`;
+    const status = readSubmissionStatus("leetcode");
+    expect(status).toMatchObject({ phase: "finished", success: false });
+    expect(status?.status).toContain("编译成功");
+    expect(status?.status).toContain("nums = [1,2]");
+    expect(status?.status).toContain("预期结果");
+  });
+
   it("returns LeetCode's restriction violation as a terminal failure", () => {
     document.body.innerHTML = "<div data-e2e-locator='console-result'>违反限制</div>";
     expect(readSubmissionStatus("leetcode")).toEqual({
       phase: "finished",
       status: "违反限制",
+      success: false
+    });
+  });
+
+  it("returns LeetCode's red restriction detail", () => {
+    document.body.innerHTML = `
+      <h2>违反限制</h2>
+      <div class="error-message">Line 7: Variable 'n' is used but not defined, causing a compilation error.</div>`;
+    expect(readSubmissionStatus("leetcode")).toEqual({
+      phase: "finished",
+      status: "违反限制\nLine 7: Variable 'n' is used but not defined, causing a compilation error.",
       success: false
     });
   });
@@ -105,6 +214,19 @@ describe("submission adapter", () => {
         textContent: "通过"
       })
     );
+    await Promise.resolve();
+    expect(transition.hasChanged()).toBe(true);
+    transition.disconnect();
+  });
+
+  it("observes Nowcoder runtime and memory changes when the verdict stays accepted", async () => {
+    document.body.innerHTML = `
+      <div class="workbench"><div class="composite-panel">
+        <div>答案正确 通过全部用例</div><span>运行时间 142ms</span><span>占用内存 2556KB</span>
+      </div></div>`;
+    const transition = observeSubmissionTransition("nowcoder");
+    document.querySelectorAll("span")[0].textContent = "运行时间 143ms";
+    document.querySelectorAll("span")[1].textContent = "占用内存 2644KB";
     await Promise.resolve();
     expect(transition.hasChanged()).toBe(true);
     transition.disconnect();
@@ -195,6 +317,40 @@ collect2: 错误: ld 返回 1</pre>`;
       kind: "error",
       text: "代码提交失败，请再次运行"
     });
+  });
+
+  it("returns Nowcoder compilation success with runtime and memory", () => {
+    document.body.innerHTML = `
+      <div class="workbench"><div class="composite-panel">
+        <strong>答案正确</strong><span>通过全部用例</span>
+        <span>运行时间 143ms</span><span>占用内存 2644KB</span>
+      </div></div>`;
+    expect(readSubmissionStatus("nowcoder")).toEqual({
+      phase: "finished",
+      status: "答案正确\n编译成功 · 运行时间 143ms · 占用内存 2644KB",
+      success: true
+    });
+  });
+
+  it("returns Nowcoder compiler diagnostics", () => {
+    document.body.innerHTML = `
+      <div class="workbench">
+        <nav>运行结果　自测输入　自测运行</nav><button class="btn-submit">保存并提交</button>
+        <p>您的代码已保存</p>
+        <div class="composite-panel">
+          <h3>编译错误</h3>
+          <div class="compile-result">编译错误:您提交的代码无法完成编译
+main.cpp:7:5: error: expected ';' after expression
+return 0</div>
+        </div>
+      </div>`;
+    expect(readSubmissionStatus("nowcoder")).toEqual({
+      phase: "finished",
+      status: "CE Compilation Error\n编译错误:您提交的代码无法完成编译\nmain.cpp:7:5: error: expected ';' after expression\nreturn 0",
+      success: false,
+      allAccepted: false
+    });
+    expect(readSubmissionStatus("nowcoder")?.status).not.toMatch(/保存并提交|运行结果|自测输入|您的代码已保存/);
   });
 
   it.each([

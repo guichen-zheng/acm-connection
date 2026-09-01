@@ -7,6 +7,7 @@ import {
   isStatementPreviewTab,
   mergeStatementMarkdown,
   normalizeRelativeDirectory,
+  preferredSolutionColumn,
   problemDirectoryName,
   resolveInitialTemplate,
   sameFile,
@@ -41,6 +42,12 @@ describe("workspace file rules", () => {
     expect(isStatementPreviewTab("markdown.preview", "题目.md 预览")).toBe(true);
     expect(isStatementPreviewTab("markdown-preview-enhanced", "Preview README.md")).toBe(false);
     expect(isStatementPreviewTab("terminal", "题目.md")).toBe(false);
+  });
+
+  it("pins solutions to the right of the statement after editor groups are renumbered", () => {
+    expect(preferredSolutionColumn(true, [1], [1])).toBe(2);
+    expect(preferredSolutionColumn(true, [3], [3])).toBe(2);
+    expect(preferredSolutionColumn(false, [1, 3], [2])).toBe(3);
   });
 
   it("sanitizes a Windows-incompatible title", () => {

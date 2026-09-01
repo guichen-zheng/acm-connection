@@ -21,8 +21,10 @@ import {
 import { languageSwitchHasSettled } from "./language-switch";
 import { extractStatementMarkdown } from "./statement";
 import {
+  activateSubmissionControl,
   describeSubmitCandidates,
   findConfirmationControl,
+  findNowcoderPostSubmissionDismissControl,
   findSubmitControl,
   isCaptchaChallengePresent,
   observeSubmissionTransition,
@@ -314,6 +316,7 @@ async function submitCode(message: {
   language: Language;
   code: string;
 }): Promise<void> {
+  if (message.site === "nowcoder") await dismissNowcoderSuccessDialog();
   const applied = await applyCode(message);
   if (!applied.ok) {
     await emitSubmissionUpdate(message.requestId, "error", applied.message ?? "代码写入网页失败", false);
@@ -338,7 +341,7 @@ async function submitCode(message: {
     return;
   }
   const transitionObserver = observeSubmissionTransition(message.site);
-  control.click();
+  activateSubmissionControl(control);
   await delay(350);
   findConfirmationControl()?.click();
   await delay(500);
@@ -352,7 +355,7 @@ async function submitCode(message: {
     }
   }
   if (message.site === "nowcoder") {
-    let start = await waitForNowcoderSubmissionStart(baseline, baselineFeedback, initialUrl);
+    let start = await waitForNowcoderSubmissionStart(baseline, baselineFeedback, initialUrl, transitionObserver);
     if (start.kind === "captcha") {
       await emitSubmissionUpdate(message.requestId, "attention", "提交需要前往题目页面输入验证码");
       const captchaResult = await waitForCaptchaCompletion();
@@ -361,7 +364,7 @@ async function submitCode(message: {
         await emitSubmissionUpdate(message.requestId, "error", captchaResult.message, false);
         return;
       }
-      start = await waitForNowcoderSubmissionStart(baseline, baselineFeedback, initialUrl);
+      start = await waitForNowcoderSubmissionStart(baseline, baselineFeedback, initialUrl, transitionObserver);
     }
     if (start.kind === "error") {
       transitionObserver.disconnect();
@@ -393,13 +396,19 @@ async function submitCode(message: {
 async function waitForNowcoderSubmissionStart(
   baseline?: SubmissionStatus,
   baselineFeedback?: SubmissionFeedback,
-  initialUrl = location.href
+  initialUrl = location.href,
+  transitionObserver?: SubmissionTransitionObserver
 ): Promise<{ kind: "started" } | { kind: "captcha" } | { kind: "error"; message: string } | { kind: "timeout" }> {
   const startedAt = Date.now();
   const baselineStatusKey = statusKey(baseline);
   const baselineFeedbackKey = feedbackKey(baselineFeedback);
   while (Date.now() - startedAt < 10_000) {
     if (isCaptchaChallengePresent()) return { kind: "captcha" };
+    // A repeated submission can finish with exactly the same verdict text as
+    // the previous one. Nowcoder may only update runtime/memory or replace the
+    // result-panel nodes, so DOM transition is authoritative evidence that the
+    // click produced a new remote submission.
+    if (transitionObserver?.hasChanged()) return { kind: "started" };
     const feedback = readSubmissionFeedback("nowcoder");
     if (feedback?.kind === "error" && feedbackKey(feedback) !== baselineFeedbackKey) {
       return { kind: "error", message: feedback.text };
@@ -460,13 +469,39 @@ async function watchSubmission(
           result.testPoints
         );
       }
-      if (result.phase === "finished" && (sawTransition || Date.now() - startedAt > 8_000)) return;
+      if (result.phase === "finished" && (sawTransition || Date.now() - startedAt > 8_000)) {
+        // Nowcoder opens a rating dialog after an accepted submission. It
+        // overlays the workbench and prevents the next synthetic submit click,
+        // so close it after reporting the verdict. The next push also performs
+        // an immediate cleanup in case the dialog appeared unusually late.
+        if (site === "nowcoder" && result.success === true) {
+          await dismissNowcoderSuccessDialog(3_000);
+        }
+        return;
+      }
     }
     await emitSubmissionUpdate(requestId, "error", "等待评测结果超时，请在网站提交记录中查看", false);
   } finally {
     transitionObserver?.disconnect();
     submissionWatchers.delete(requestId);
   }
+}
+
+async function dismissNowcoderSuccessDialog(waitMs = 0): Promise<boolean> {
+  const deadline = Date.now() + waitMs;
+  do {
+    const control = findNowcoderPostSubmissionDismissControl();
+    if (control) {
+      activateSubmissionControl(control);
+      const closeDeadline = Date.now() + 1_500;
+      while (Date.now() < closeDeadline) {
+        await delay(100);
+        if (!findNowcoderPostSubmissionDismissControl()) return true;
+      }
+    }
+    if (Date.now() >= deadline) return false;
+    await delay(100);
+  } while (true);
 }
 
 function statusKey(status?: SubmissionStatus): string {

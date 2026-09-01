@@ -27,7 +27,14 @@ const SUBMIT_LABELS: Record<Site, RegExp> = {
 
 const RESULT_SELECTORS: Record<Site, string[]> = {
   luogu: ["[class*='record-status']", "[class*='judge-status']", "[class*='result']", "[class*='status']"],
-  nowcoder: ["[class*='result']", "[class*='judge']", "[class*='status']", ".result-status"],
+  nowcoder: [
+    ".workbench .composite-panel",
+    ".answer-module .composite-panel",
+    "[class*='result']",
+    "[class*='judge']",
+    "[class*='status']",
+    ".result-status"
+  ],
   leetcode: [
     "[data-e2e-locator='console-result']",
     "[data-e2e-locator='submission-result']",
@@ -42,13 +49,7 @@ const RESULT_SELECTORS: Record<Site, string[]> = {
 
 export function findSubmitControl(site: Site, doc = document): HTMLElement | undefined {
   if (site === "nowcoder") {
-    // The current Nowcoder workbench also renders “保存并提交” in its
-    // keyboard-shortcut help. Prefer the real bound control instead of a
-    // same-labelled descendant from that popover.
-    const located = Array.from(doc.querySelectorAll<HTMLElement>(
-      ".workbench button.btn-submit, .answer-module button.btn-submit, button.btn-submit"
-    )).find(isUsable);
-    if (located) return located;
+    return findNowcoderSubmitControl(doc);
   }
   if (site === "leetcode") {
     const located = doc.querySelector<HTMLElement>(
@@ -70,6 +71,41 @@ export function findSubmitControl(site: Site, doc = document): HTMLElement | und
     if (isUsable(actionable)) return actionable;
   }
   return undefined;
+}
+
+function findNowcoderSubmitControl(doc: Document): HTMLElement | undefined {
+  const direct = Array.from(doc.querySelectorAll<HTMLElement>(
+    ".workbench button.btn-submit, .answer-module button.btn-submit, button.btn-submit"
+  ));
+  const labelled = Array.from(doc.querySelectorAll<HTMLElement>("body *"))
+    .filter((element) => SUBMIT_LABELS.nowcoder.test(controlLabel(element)))
+    .map((element) => element.closest<HTMLElement>(
+      "button, a, input[type='submit'], input[type='button'], [role='button'], [class*='button'], [class*='btn']"
+    ) ?? element);
+  return [...direct, ...labelled]
+    .filter((element, index, all) => all.indexOf(element) === index)
+    .filter((element) => isUsable(element) && SUBMIT_LABELS.nowcoder.test(controlLabel(element)))
+    .map((element) => ({ element, score: nowcoderSubmitControlScore(element) }))
+    .sort((left, right) => right.score - left.score)[0]?.element;
+}
+
+function nowcoderSubmitControlScore(element: HTMLElement): number {
+  const rect = element.getBoundingClientRect();
+  const hasGeometry = rect.width > 1 && rect.height > 1;
+  const inViewport = hasGeometry && rect.bottom >= 0 && rect.right >= 0 &&
+    rect.top <= (element.ownerDocument.defaultView?.innerHeight ?? Number.POSITIVE_INFINITY) &&
+    rect.left <= (element.ownerDocument.defaultView?.innerWidth ?? Number.POSITIVE_INFINITY);
+  let score = 0;
+  if (/^保存并提交$/i.test(controlLabel(element))) score += 1_000;
+  if (element.matches("button, input[type='submit'], input[type='button']")) score += 250;
+  if (element.matches("button.btn-submit, [class~='btn-submit']")) score += 600;
+  if (element.closest(".workbench, .answer-module")) score += 300;
+  if (element.closest("[class*='shortcut' i], [class*='popover' i], [class*='tooltip' i], [class*='help' i]")) {
+    score -= 20_000;
+  }
+  if (hasGeometry) score += 2_000 + Math.max(0, rect.left) + Math.max(0, rect.top) / 10;
+  if (inViewport) score += 500;
+  return score;
 }
 
 export function describeSubmitCandidates(doc = document): string {
@@ -94,6 +130,61 @@ export function findConfirmationControl(doc = document): HTMLElement | undefined
     if (match) return match;
   }
   return undefined;
+}
+
+export function findNowcoderPostSubmissionDismissControl(doc = document): HTMLElement | undefined {
+  const successHeading = /恭喜(?:你)?(?:(?:已)?通过|.*\bAC\b).*(?:本题|题目)/i;
+  const markers = deepQueryAll<HTMLElement>(doc, "body *, *")
+    .filter(isUsable)
+    .map((element) => ({ element, text: normalize(element.innerText || element.textContent || "") }))
+    .filter(({ text }) => text.length > 0 && successHeading.test(text))
+    .sort((left, right) => left.text.length - right.text.length);
+
+  for (const { element } of markers) {
+    let container: HTMLElement | null = element;
+    for (let depth = 0; container && depth < 10; depth++, container = container.parentElement) {
+      const controls = deepQueryAll<HTMLElement>(container,
+        "button, [role='button'], input[type='button'], [aria-label], [title], [class*='close' i]"
+      ).filter(isUsable);
+      const labelledClose = controls.find((control) =>
+        /^(?:关闭|取消|稍后再说|close)$/i.test(controlLabel(control)));
+      if (labelledClose) return labelledClose;
+      const iconClose = controls.find((control) =>
+        /(?:close|关闭)/i.test([
+          control.getAttribute("aria-label"),
+          control.getAttribute("title"),
+          control.className
+        ].filter((value): value is string => typeof value === "string").join(" ")));
+      if (iconClose) return iconClose;
+    }
+  }
+  return undefined;
+}
+
+export function activateSubmissionControl(element: HTMLElement): void {
+  const view = element.ownerDocument.defaultView;
+  const rect = element.getBoundingClientRect();
+  const init: MouseEventInit = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    button: 0,
+    buttons: 1,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2
+  };
+  const Pointer = view?.PointerEvent;
+  const Mouse = view?.MouseEvent ?? MouseEvent;
+  element.dispatchEvent(Pointer
+    ? new Pointer("pointerdown", { ...init, pointerType: "mouse", isPrimary: true })
+    : new Mouse("pointerdown", init));
+  element.dispatchEvent(new Mouse("mousedown", init));
+  element.focus();
+  element.dispatchEvent(Pointer
+    ? new Pointer("pointerup", { ...init, buttons: 0, pointerType: "mouse", isPrimary: true })
+    : new Mouse("pointerup", { ...init, buttons: 0 }));
+  element.dispatchEvent(new Mouse("mouseup", { ...init, buttons: 0 }));
+  HTMLElement.prototype.click.call(element);
 }
 
 export function isCaptchaChallengePresent(doc = document): boolean {
@@ -232,35 +323,208 @@ function readNowcoderWorkbenchStatus(doc: Document): SubmissionStatus | undefine
   const roots = Array.from(doc.querySelectorAll<HTMLElement>(
     ".workbench .composite-panel, .answer-module .composite-panel"
   )).filter(isUsable);
-  const candidates = roots.flatMap((root) => [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))])
-    .filter(isUsable)
-    .map((element) => normalize(element.innerText || element.textContent || ""))
-    .filter((text) => text.length > 0 && text.length <= 2_000)
-    .sort((left, right) => left.length - right.length);
-  return candidates.map(classifySubmissionStatus)
-    .find((status): status is SubmissionStatus => status !== undefined);
+  const compileFailure = readNowcoderCompileFailure(roots);
+  if (compileFailure) return compileFailure;
+  for (const root of roots) {
+    const candidates = [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))]
+      .filter(isUsable)
+      .map((element) => normalize(element.innerText || element.textContent || ""))
+      .filter((text) => text.length > 0 && text.length <= 2_000)
+      .sort((left, right) => left.length - right.length);
+    const status = candidates.map(classifySubmissionStatus)
+      .find((candidate): candidate is SubmissionStatus => candidate !== undefined);
+    if (!status) continue;
+    if (status.phase !== "finished") return status;
+    const metrics = readNowcoderMetrics(root);
+    return {
+      ...status,
+      status: `${status.status}\n编译成功${metrics ? ` · ${metrics}` : ""}`
+    };
+  }
+  return undefined;
+}
+
+function readNowcoderCompileFailure(roots: HTMLElement[]): SubmissionStatus | undefined {
+  const marker = roots.find((root) =>
+    /(?:编译失败|编译错误|编译出错|Compilation Error|Compile Error)/i.test(
+      normalize(root.innerText || root.textContent || "")
+    ));
+  if (!marker) return undefined;
+  const preferred = Array.from(marker.querySelectorAll<HTMLElement>([
+    "pre",
+    "code",
+    "textarea",
+    "[class*='compile' i]",
+    "[class*='compiler' i]",
+    "[class*='error-message' i]",
+    "[class*='error-info' i]"
+  ].join(","))).map(readMultilineText);
+  const fallback = [marker, ...Array.from(marker.querySelectorAll<HTMLElement>("*"))]
+    .map(readMultilineText)
+    .filter((text) => text.length <= 20_000);
+  const detail = [...preferred, ...fallback]
+    .map(cleanNowcoderCompilerOutput)
+    .filter(isUsefulCompilerOutput)
+    .sort((left, right) => compilerOutputScore(right) - compilerOutputScore(left))[0] ?? "";
+  return {
+    phase: "finished",
+    status: detail ? `CE Compilation Error\n${detail.slice(0, 1_800)}` : "CE Compilation Error",
+    success: false,
+    allAccepted: false
+  };
+}
+
+function cleanNowcoderCompilerOutput(text: string): string {
+  const raw = text.replace(/\r/g, "").trim();
+  if (!raw) return "";
+  const detailedHeading = raw.match(/编译(?:错误|失败|出错)\s*[:：]\s*(?:您提交的代码)?[^\n]*/i);
+  const lineHeading = raw.match(/(?:^|\n)\s*(?:编译失败|编译错误|编译出错|Compilation Error|Compile Error)\s*(?:\n|$)/i);
+  const diagnostic = raw.match(/(?:^|\n)\s*(?:[^\n]*\.(?:c|cc|cpp|cxx|java|py):\d+(?::\d+)?:|(?:fatal\s+)?error:|warning:|note:|undefined reference|Traceback)/i);
+  const start = detailedHeading?.index ?? lineHeading?.index ?? diagnostic?.index ?? 0;
+  const cropped = raw.slice(start).replace(/^\s+/, "");
+  return (detailedHeading ? cropped : cleanCompilerOutput(cropped))
+    .split("\n")
+    .filter((line) => !/^(?:运行结果|自测输入|自测运行|保存并提交|您的代码已保存)\s*$/i.test(line.trim()))
+    .join("\n")
+    .trim();
+}
+
+function readNowcoderMetrics(root: HTMLElement): string {
+  const text = normalize(root.innerText || root.textContent || "");
+  const time = text.match(/运行时间\s*[:：]?\s*(\d+(?:\.\d+)?\s*(?:ms|s))/i)?.[1]?.replace(/\s+/g, "");
+  const memory = text.match(/(?:占用内存|内存消耗|使用内存)\s*[:：]?\s*(\d+(?:\.\d+)?\s*(?:KB|MB|GB|B))/i)?.[1]
+    ?.replace(/\s+/g, "");
+  return [time ? `运行时间 ${time}` : "", memory ? `占用内存 ${memory}` : ""].filter(Boolean).join(" · ");
 }
 
 function readLeetcodeStatus(doc: Document): SubmissionStatus | undefined {
   const direct = Array.from(doc.querySelectorAll<HTMLElement>(
     "[data-e2e-locator='console-result'], [data-e2e-locator='submission-result']"
-  )).map((element) => normalize(element.innerText || element.textContent || ""));
-  for (const text of direct.filter(Boolean)) {
-    const classified = classifySubmissionStatus(text);
-    if (classified) return classified;
+  ));
+  for (const root of direct.filter(isUsable)) {
+    const compileFailure = readLeetcodeCompileFailure(root);
+    if (compileFailure) return compileFailure;
+    const candidates = [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))]
+      .filter(isUsable)
+      .map((element) => normalize(element.innerText || element.textContent || ""))
+      .filter(Boolean)
+      .sort((left, right) => left.length - right.length);
+    const classified = candidates.map(classifySubmissionStatus)
+      .find((status): status is SubmissionStatus => status !== undefined);
+    if (classified) return enrichLeetcodeStatus(classified, root, doc);
     // console-result/submission-result are terminal result components in the
     // current LeetCode UI. Treat an unfamiliar non-empty verdict as a failure
     // so a future translation cannot leave the CLI locked forever.
-    return { phase: "finished", status: text.slice(0, 500), success: false };
+    const text = readMultilineText(root);
+    if (text) return { phase: "finished", status: text.slice(0, 1_800), success: false };
   }
   const exactStatus = /^(?:通过|执行通过|Accepted|错误解答|答案错误|Wrong Answer|违反限制|超出内存限制|内存超限|超出输出限制|输出超限|超出时间限制|运行超时|执行出错|运行错误|内部出错|系统错误|编译出错|编译错误|超时|Restrictions Failed|校验中|校验完成|正在准备执行环境|正在编译代码|正在运行测试用例|评测中|等待评测)$/i;
   const fallback = Array.from(doc.querySelectorAll<HTMLElement>("body *"))
     .filter((element) => element.children.length === 0 && isUsable(element))
     .map((element) => normalize(element.innerText || element.textContent || ""))
     .filter((text) => exactStatus.test(text));
-  return fallback
+  const fallbackStatus = fallback
     .map(classifySubmissionStatus)
     .find((status): status is SubmissionStatus => status !== undefined);
+  return fallbackStatus ? enrichLeetcodeStatus(fallbackStatus, undefined, doc) : undefined;
+}
+
+function readLeetcodeCompileFailure(root: HTMLElement): SubmissionStatus | undefined {
+  const rootText = normalize(root.innerText || root.textContent || "");
+  if (!/(?:编译失败|编译错误|编译出错|Compilation Error|Compile Error)/i.test(rootText)) return undefined;
+  const preferred = Array.from(root.querySelectorAll<HTMLElement>([
+    "pre",
+    "code",
+    "textarea",
+    "[class*='compile' i]",
+    "[class*='compiler' i]",
+    "[class*='error-message' i]"
+  ].join(","))).map(readMultilineText).map(cleanCompilerOutput).filter(isUsefulCompilerOutput);
+  const fallback = [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))]
+    .map(readMultilineText)
+    .map(cleanCompilerOutput)
+    .filter((text) => text.length <= 20_000 && isUsefulCompilerOutput(text))
+    .sort((left, right) => compilerOutputScore(right) - compilerOutputScore(left));
+  const detail = preferred.sort((left, right) => compilerOutputScore(right) - compilerOutputScore(left))[0] ?? fallback[0] ?? "";
+  return {
+    phase: "finished",
+    status: detail ? `CE Compilation Error\n${detail.slice(0, 1_800)}` : "CE Compilation Error",
+    success: false,
+    allAccepted: false
+  };
+}
+
+function enrichLeetcodeStatus(status: SubmissionStatus, root: HTMLElement | undefined, doc: Document): SubmissionStatus {
+  if (status.phase !== "finished") return status;
+  const restriction = /(?:违反限制|Restrictions Failed)/i.test(status.status)
+    ? readLeetcodeRestrictionDetail(doc, root)
+    : "";
+  const metrics = readLeetcodeMetrics(root, doc);
+  const compiled = status.success === true || /(?:错误解答|答案错误|Wrong Answer|Runtime Error|运行错误|执行出错|运行超时|Time Limit|内存超限|Memory Limit|输出超限|Output Limit)/i.test(status.status);
+  const details = restriction || (root ? readLeetcodeResultDetails(root, status.status) : "");
+  return {
+    ...status,
+    status: [
+      status.status,
+      compiled ? `编译成功${metrics ? ` · ${metrics}` : ""}` : metrics,
+      details
+    ].filter(Boolean).join("\n").slice(0, 1_900)
+  };
+}
+
+function readLeetcodeMetrics(root: HTMLElement | undefined, doc: Document): string {
+  const rootText = normalize(root?.innerText || root?.textContent || "");
+  const metricTexts = [rootText, ...Array.from(doc.querySelectorAll<HTMLElement>("body *"))
+    .filter(isUsable)
+    .map((element) => normalize(element.innerText || element.textContent || ""))
+    .filter((text) => text.length > 0 && text.length <= 500)]
+    .filter((text, index, all) => all.indexOf(text) === index)
+    .sort((left, right) => left.length - right.length);
+  const time = metricTexts
+    .map((text) => text.match(/(?:执行用时(?:分布)?|运行时间)\s*[:：]?\s*(\d+(?:\.\d+)?\s*(?:ms|s))/i)?.[1])
+    .find((value): value is string => typeof value === "string")
+    ?.replace(/\s+/g, "");
+  const memory = metricTexts
+    .map((text) => text.match(/(?:消耗内存(?:分布)?|内存消耗|占用内存|使用内存)\s*[:：]?\s*(\d+(?:\.\d+)?\s*(?:KB|MB|GB|B))/i)?.[1])
+    .find((value): value is string => typeof value === "string")
+    ?.replace(/\s+/g, "");
+  return [time ? `执行用时 ${time}` : "", memory ? `内存消耗 ${memory}` : ""].filter(Boolean).join(" · ");
+}
+
+function readLeetcodeRestrictionDetail(doc: Document, root?: HTMLElement): string {
+  const preferred = Array.from(doc.querySelectorAll<HTMLElement>([
+    "[role='alert']",
+    "[class*='violation' i]",
+    "[class*='error-message' i]",
+    "[class*='error-info' i]",
+    "[class*='danger' i]"
+  ].join(",")));
+  const candidates = [
+    ...(root ? [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))] : []),
+    ...preferred,
+    ...Array.from(doc.querySelectorAll<HTMLElement>("body *"))
+  ].filter((element, index, all) => all.indexOf(element) === index)
+    .filter(isUsable)
+    .map(readMultilineText)
+    .map((text) => text.trim())
+    .filter((text) => text.length > 0 && text.length <= 2_000)
+    .filter((text) => /(?:^|\b)Line\s+\d+(?::\d+)?:|used but not defined|causing a compilation error|校验.*(?:错误|失败)/i.test(text))
+    .sort((left, right) => left.length - right.length);
+  return candidates[0]?.slice(0, 1_400) ?? "";
+}
+
+function readLeetcodeResultDetails(root: HTMLElement, verdict: string): string {
+  const verdictText = normalize(verdict);
+  return readMultilineText(root)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => normalize(line) !== verdictText)
+    .filter((line) => !/^(?:执行用时|运行时间|内存消耗|占用内存|使用内存)\s*[:：]?/i.test(line))
+    .filter((line) => !/^(?:提交|运行|控制台|测试结果)\s*$/i.test(line))
+    .filter((line, index, all) => all.indexOf(line) === index)
+    .join("\n")
+    .slice(0, 1_400);
 }
 
 function readLuoguCompileFailure(doc: Document): SubmissionStatus | undefined {
@@ -305,7 +569,7 @@ function compilerOutputScore(text: string): number {
 
 function cleanCompilerOutput(text: string): string {
   return text
-    .replace(/^\s*(?:编译信息|编译失败|编译错误|Compilation Error|Compile Error)\s*/i, "")
+    .replace(/^\s*(?:编译信息|编译失败|编译错误|编译出错|Compilation Error|Compile Error)\s*/i, "")
     .replace(/[ \t]+$/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -412,6 +676,24 @@ function elementDepth(element: HTMLElement): number {
   return depth;
 }
 
+function deepQueryAll<T extends Element>(root: ParentNode, selector: string): T[] {
+  const roots: ParentNode[] = [root];
+  const result: T[] = [];
+  const seen = new Set<Element>();
+  for (let index = 0; index < roots.length; index += 1) {
+    const currentRoot = roots[index];
+    for (const element of Array.from(currentRoot.querySelectorAll(selector))) {
+      if (seen.has(element)) continue;
+      seen.add(element);
+      result.push(element as T);
+    }
+    for (const element of Array.from(currentRoot.querySelectorAll<HTMLElement>("*"))) {
+      if (element.shadowRoot) roots.push(element.shadowRoot);
+    }
+  }
+  return result;
+}
+
 function isUsable(element: HTMLElement): boolean {
   const disabled = element instanceof HTMLButtonElement || element instanceof HTMLInputElement
     ? element.disabled
@@ -422,7 +704,8 @@ function isUsable(element: HTMLElement): boolean {
     const computed = typeof getComputedStyle === "function" ? getComputedStyle(current) : undefined;
     if (current.hidden || current.getAttribute("aria-hidden") === "true" ||
       /(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(style) ||
-      computed?.display === "none" || computed?.visibility === "hidden") return false;
+      computed?.display === "none" || computed?.visibility === "hidden" ||
+      computed?.opacity === "0" || computed?.pointerEvents === "none") return false;
   }
   return true;
 }

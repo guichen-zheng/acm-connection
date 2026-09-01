@@ -42,6 +42,52 @@ export function isPotentialProblemUrl(rawUrl: string | undefined): boolean {
   }
 }
 
+export function luoguIdeUrlForProblem(rawUrl: string | undefined, problemId: string): string | undefined {
+  if (!rawUrl) return undefined;
+  try {
+    const url = new URL(rawUrl);
+    const match = url.hostname === "www.luogu.com.cn"
+      ? url.pathname.match(/^\/problem\/([^/]+)\/?$/i)
+      : undefined;
+    if (!match || decodeURIComponent(match[1]).toLowerCase() !== problemId.trim().toLowerCase()) return undefined;
+    url.hash = "ide";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+export function luoguRecordId(rawUrl: string | undefined): string | undefined {
+  if (!rawUrl) return undefined;
+  try {
+    const url = new URL(rawUrl);
+    const match = url.hostname === "www.luogu.com.cn"
+      ? url.pathname.match(/^\/record\/(\d+)\/?$/i)
+      : undefined;
+    return match?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+export function findLuoguProblemIdeLinkInPage(problemId: string): string | undefined {
+  const expected = problemId.trim().toLowerCase();
+  for (const anchor of document.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+    try {
+      const url = new URL(anchor.getAttribute("href")!, location.href);
+      const match = url.hostname === "www.luogu.com.cn"
+        ? url.pathname.match(/^\/problem\/([^/]+)\/?$/i)
+        : undefined;
+      if (!match || decodeURIComponent(match[1]).toLowerCase() !== expected) continue;
+      url.hash = "ide";
+      return url.toString();
+    } catch {
+      // Ignore malformed links and continue looking for the exact problem.
+    }
+  }
+  return undefined;
+}
+
 export function problemCodeMatchesContext(rawCode: string, site: Site, problemId: string): boolean {
   const destination = problemDestination(rawCode);
   if (!destination) return false;

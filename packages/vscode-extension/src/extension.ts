@@ -37,6 +37,7 @@ import {
   isStatementPreviewTab,
   mergeStatementMarkdown,
   normalizeRelativeDirectory,
+  preferredSolutionColumn,
   problemDirectoryName,
   resolveInitialTemplate,
   sanitizePathPart,
@@ -773,12 +774,12 @@ async function showSolutionDocument(
   // Column one belongs exclusively to the statement and its preview. Never
   // reuse a solution tab that was manually dragged there or left there by an
   // older release.
-  const keep = matchingTabs.find(({ group }) => group.viewColumn !== vscode.ViewColumn.One);
-  const previous = previousFileUri
-    ? textTabsFor(previousFileUri).find(({ group }) => group.viewColumn !== vscode.ViewColumn.One)
-    : undefined;
-  const targetColumn = keep?.group.viewColumn ?? previous?.group.viewColumn ??
-    (statementPreview ? vscode.ViewColumn.Two : undefined);
+  const previousTabs = previousFileUri ? textTabsFor(previousFileUri) : [];
+  const targetColumn = preferredSolutionColumn(
+    statementPreview,
+    matchingTabs.map(({ group }) => group.viewColumn),
+    previousTabs.map(({ group }) => group.viewColumn)
+  ) as vscode.ViewColumn | undefined;
   await vscode.window.showTextDocument(document, {
     preview: false,
     preserveFocus: false,
@@ -817,8 +818,18 @@ async function showStatementPreviewNow(
   folder: vscode.WorkspaceFolder,
   config: WorkspaceConfig
 ): Promise<void> {
-  await closeStatementGroupTabs(statementUri, folder, config);
   const statementDocument = await vscode.workspace.openTextDocument(statementUri);
+  // Open the new statement before closing stale left-side tabs. This anchors
+  // column one so VS Code cannot collapse it and renumber the old solution
+  // group from column two to column one during a problem switch.
+  await vscode.window.showTextDocument(statementDocument, {
+    preview: true,
+    preserveFocus: false,
+    viewColumn: vscode.ViewColumn.One
+  });
+  await closeStatementGroupTabs(statementUri, folder, config);
+  // Moving a dirty stale tab to the solution group can change the active
+  // editor. Refocus the statement so the preview command opens on the left.
   await vscode.window.showTextDocument(statementDocument, {
     preview: true,
     preserveFocus: false,
