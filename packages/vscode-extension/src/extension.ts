@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import {
@@ -14,23 +16,36 @@ import {
   problemKey,
   type ActiveEditorChangedMessage,
   type BrowserToWorkspaceMessage,
+  type CliBrowserRefreshMessage,
+  type CliFetchMessage,
   type CliPushMessage,
+  type CliRemoteMessage,
+  type CliRefreshMessage,
+  type CliSwitchMessage,
   type CliUpdateMessage,
+  type Language,
   type ProblemContext,
   type Site,
+  type TestPointResult,
   type WorkspaceToBrowserMessage
 } from "@algo-sync/shared";
 import {
   DEFAULT_SITE_DIRECTORIES,
   STATEMENT_FILENAME,
   existingFilePrefix,
+  formatRemoteProblems,
+  isStatementPreviewTab,
   mergeStatementMarkdown,
   normalizeRelativeDirectory,
   problemDirectoryName,
+  resolveInitialTemplate,
+  sanitizePathPart,
+  shouldDispatchLanguageSwitch,
   shouldSyncSavedFile,
   solutionFilename,
   type WorkspaceConfig
 } from "./core";
+import { planBrowserWake, type BrowserWakePlan } from "./browser-launch";
 
 interface ActiveTarget {
   key: string;
@@ -38,6 +53,7 @@ interface ActiveTarget {
   context: ProblemContext;
   fileUri: vscode.Uri;
   statementUri: vscode.Uri;
+  initialUri: vscode.Uri;
   socket: WebSocket;
 }
 
@@ -47,16 +63,37 @@ interface PendingCliSubmission {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+interface BrowserConnection {
+  userAgent: string;
+  connectedAt: number;
+}
+
+interface PendingCliAction {
+  socket: WebSocket;
+  browserSocket: WebSocket;
+  timeout: ReturnType<typeof setTimeout>;
+  target?: ActiveTarget;
+  rollbackCode?: string;
+  resultLanguage?: Language;
+}
+
 let server: WebSocketServer | undefined;
 let activeTarget: ActiveTarget | undefined;
 let status: vscode.StatusBarItem | undefined;
 let statusText = "未启动";
 let output: vscode.OutputChannel | undefined;
 const pendingCliSubmissions = new Map<string, PendingCliSubmission>();
+const browserConnections = new Map<WebSocket, BrowserConnection>();
+const pendingCliActions = new Map<string, PendingCliAction>();
+const suppressedSavePaths = new Set<string>();
 const MPE_EXTENSION_ID = "shd101wyy.markdown-preview-enhanced";
 const MPE_OPEN_PREVIEW_COMMAND = "markdown-preview-enhanced.openPreview";
+const LAST_BROWSER_KEY = "algoSync.lastBrowser";
+let extensionContextRef: vscode.ExtensionContext | undefined;
+let statementPreviewQueue: Promise<void> = Promise.resolve();
 
 export async function activate(extensionContext: vscode.ExtensionContext): Promise<void> {
+  extensionContextRef = extensionContext;
   const located = await locateWorkspace();
   if (!located) return;
   const { folder, marker } = located;
@@ -81,7 +118,7 @@ export async function activate(extensionContext: vscode.ExtensionContext): Promi
         void vscode.window.showInformationMessage("Algo Sync：当前没有活动题目");
         return;
       }
-      void showStatementPreview(activeTarget.statementUri);
+      void showStatementPreview(activeTarget.statementUri, folder, config);
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
       void handleSavedDocument(document);
@@ -101,9 +138,13 @@ export async function activate(extensionContext: vscode.ExtensionContext): Promi
 }
 
 export function deactivate(): void {
+  extensionContextRef = undefined;
   activeTarget = undefined;
   for (const pending of pendingCliSubmissions.values()) clearTimeout(pending.timeout);
   pendingCliSubmissions.clear();
+  for (const pending of pendingCliActions.values()) clearTimeout(pending.timeout);
+  pendingCliActions.clear();
+  browserConnections.clear();
   server?.close();
   server = undefined;
 }
@@ -190,6 +231,10 @@ function attachBrowserSocket(socket: WebSocket, folder: vscode.WorkspaceFolder, 
     for (const [requestId, pending] of pendingCliSubmissions) {
       if (pending.tabId === closedTarget?.tabId) finishCliSubmission(requestId, "error", "浏览器连接已断开", false);
     }
+    browserConnections.delete(socket);
+    for (const [requestId, pending] of pendingCliActions) {
+      if (pending.browserSocket === socket) void finishCliAction(requestId, false, "浏览器连接已断开");
+    }
     setStatus("正在等待浏览器", "$(radio-tower) Algo Sync");
     log("浏览器连接已关闭");
   });
@@ -215,12 +260,23 @@ function attachCliSocket(socket: WebSocket, folder: vscode.WorkspaceFolder): voi
       return;
     }
     if (message.type === "cliPush") void handleCliPush(socket, message, folder);
+    if (message.type === "cliRefresh") void handleCliRefresh(socket, message, folder);
+    if (message.type === "cliFetch") void handleCliFetch(socket, message, folder);
+    if (message.type === "cliBrowserRefresh") void handleCliBrowserRefresh(socket, message, folder);
+    if (message.type === "cliRemote") void handleCliRemote(socket, message, folder);
+    if (message.type === "cliSwitch") void handleCliSwitch(socket, message, folder);
   });
   socket.on("close", () => {
     for (const [requestId, pending] of pendingCliSubmissions) {
       if (pending.socket === socket) {
         clearTimeout(pending.timeout);
         pendingCliSubmissions.delete(requestId);
+      }
+    }
+    for (const [requestId, pending] of pendingCliActions) {
+      if (pending.socket === socket) {
+        clearTimeout(pending.timeout);
+        pendingCliActions.delete(requestId);
       }
     }
   });
@@ -272,6 +328,324 @@ async function handleCliPush(socket: WebSocket, message: CliPushMessage, folder:
   log(`CLI 请求提交：${target.context.site}/${target.context.problemId}/${target.context.language}，${code.length} 字符`);
 }
 
+async function handleCliRefresh(
+  socket: WebSocket,
+  message: CliRefreshMessage,
+  folder: vscode.WorkspaceFolder
+): Promise<void> {
+  const target = activeTarget;
+  const targetError = validateCliTarget(target, message.cwd, folder);
+  if (targetError || !target) {
+    sendCliUpdate(socket, message.requestId, "error", targetError ?? "当前没有活动题目", target, false);
+    return;
+  }
+  if (pendingCliSubmissions.size > 0 || pendingCliActions.size > 0) {
+    sendCliUpdate(socket, message.requestId, "error", "已有命令正在等待浏览器响应，请稍后再试", target, false);
+    return;
+  }
+  const code = resolveInitialTemplate(target.context.initialCode, target.context.site);
+  if (code === undefined) {
+    sendCliUpdate(
+      socket,
+      message.requestId,
+      "error",
+      "网页没有提供可信的官方初始模板；为避免把上次代码当成模板，本次没有执行恢复",
+      target,
+      false
+    );
+    return;
+  }
+  const document = await vscode.workspace.openTextDocument(target.fileUri);
+  const rollbackCode = document.getText();
+  const end = document.lineAt(document.lineCount - 1).range.end;
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(target.fileUri, new vscode.Range(new vscode.Position(0, 0), end), code);
+  const saveKey = normalizedPathKey(target.fileUri.fsPath);
+  suppressedSavePaths.add(saveKey);
+  if (!await vscode.workspace.applyEdit(edit) || !await document.save()) {
+    suppressedSavePaths.delete(saveKey);
+    sendCliUpdate(socket, message.requestId, "error", "无法写入或保存本地代码文件", target, false);
+    return;
+  }
+  setTimeout(() => suppressedSavePaths.delete(saveKey), 1_000);
+  startCliAction(message.requestId, socket, target.socket, target, rollbackCode);
+  sendCliUpdate(socket, message.requestId, "preparing", `正在恢复 ${path.basename(target.fileUri.fsPath)}`, target);
+  send(target.socket, {
+    type: "resetCode",
+    protocolVersion: PROTOCOL_VERSION,
+    requestId: message.requestId,
+    tabId: target.tabId,
+    site: target.context.site,
+    problemId: target.context.problemId,
+    language: target.context.language,
+    code
+  });
+}
+
+async function handleCliFetch(socket: WebSocket, message: CliFetchMessage, folder: vscode.WorkspaceFolder): Promise<void> {
+  if (!isSameOrInside(path.resolve(message.cwd), path.resolve(folder.uri.fsPath))) {
+    sendCliUpdate(socket, message.requestId, "error", "请在当前 Algo Sync 工作空间内运行 acm fetch", undefined, false);
+    return;
+  }
+  sendCliUpdate(socket, message.requestId, "preparing", `正在查找并打开 ${message.problemCode}`);
+  const browserSocket = await ensureFetchBrowserSocket();
+  if (!browserSocket) {
+    sendCliUpdate(
+      socket,
+      message.requestId,
+      "error",
+      "无法启动或连接 Edge/Chrome；请确认浏览器已安装并加载 Algo Sync 扩展",
+      undefined,
+      false
+    );
+    return;
+  }
+  startCliAction(message.requestId, socket, browserSocket);
+  send(browserSocket, {
+    type: "navigateToProblem",
+    protocolVersion: PROTOCOL_VERSION,
+    requestId: message.requestId,
+    problemCode: message.problemCode
+  });
+}
+
+async function handleCliRemote(
+  socket: WebSocket,
+  message: CliRemoteMessage,
+  folder: vscode.WorkspaceFolder
+): Promise<void> {
+  if (!isSameOrInside(path.resolve(message.cwd), path.resolve(folder.uri.fsPath))) {
+    sendCliUpdate(socket, message.requestId, "error", "请在当前 Algo Sync 工作空间内运行 acm remote", undefined, false);
+    return;
+  }
+  const browserSocket = selectBrowserSocket();
+  if (!browserSocket) {
+    sendCliUpdate(socket, message.requestId, "error", "当前没有已连接的浏览器扩展", undefined, false);
+    return;
+  }
+  startCliAction(message.requestId, socket, browserSocket);
+  send(browserSocket, {
+    type: "listRemoteProblems",
+    protocolVersion: PROTOCOL_VERSION,
+    requestId: message.requestId
+  });
+}
+
+async function handleCliSwitch(
+  socket: WebSocket,
+  message: CliSwitchMessage,
+  folder: vscode.WorkspaceFolder
+): Promise<void> {
+  const target = activeTarget;
+  const targetError = validateCliTarget(target, message.cwd, folder);
+  if (targetError || !target) {
+    sendCliUpdate(socket, message.requestId, "error", targetError ?? "当前没有活动题目", target, false);
+    return;
+  }
+  if (pendingCliSubmissions.size > 0 || pendingCliActions.size > 0) {
+    sendCliUpdate(socket, message.requestId, "error", "已有命令正在等待浏览器响应，请稍后再试", target, false);
+    return;
+  }
+  if (!shouldDispatchLanguageSwitch(target.context.site, target.context.language, message.language)) {
+    sendCliUpdate(socket, message.requestId, "completed", `当前题目已经是 ${message.language}`, target, true);
+    return;
+  }
+  startCliAction(message.requestId, socket, target.socket, target, undefined, message.language);
+  sendCliUpdate(socket, message.requestId, "preparing", `正在切换到 ${message.language}`, target);
+  send(target.socket, {
+    type: "switchLanguage",
+    protocolVersion: PROTOCOL_VERSION,
+    requestId: message.requestId,
+    tabId: target.tabId,
+    site: target.context.site,
+    problemId: target.context.problemId,
+    language: message.language
+  });
+}
+
+async function ensureFetchBrowserSocket(): Promise<WebSocket | undefined> {
+  const connected = selectBrowserSocket();
+  if (connected) return connected;
+  // A freshly activated workspace can race with an already running browser's
+  // extension handshake. Give it a short chance before starting a process.
+  const connecting = await waitForBrowserSocket(1_500);
+  if (connecting) return connecting;
+  if (process.platform !== "win32") return undefined;
+
+  const preferred = extensionContextRef?.globalState.get<"edge" | "chrome">(LAST_BROWSER_KEY);
+  // Wake exactly one preferred browser. Trying both Edge and Chrome creates two
+  // unrelated windows when neither profile has loaded the extension yet.
+  const wakePlan = planBrowserWake(browserExecutables(preferred));
+  if (!wakePlan || !await launchBrowserExecutable(wakePlan)) return undefined;
+  return waitForBrowserSocket(15_000);
+}
+
+async function waitForBrowserSocket(timeoutMs: number): Promise<WebSocket | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const socket = selectBrowserSocket();
+    if (socket) return socket;
+  }
+  return undefined;
+}
+
+async function launchBrowserExecutable(plan: BrowserWakePlan): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    // Chromium's no-startup-window mode starts the browser for background apps
+    // without opening or focusing a window. Once connected, the extension
+    // creates a minimized window only if no browser window already exists.
+    const child = spawn(plan.executable, plan.arguments, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    child.once("spawn", () => {
+      child.unref();
+      resolve(true);
+    });
+    child.once("error", () => resolve(false));
+  });
+}
+
+function browserExecutables(preferred?: "edge" | "chrome"): string[] {
+  const programFiles = process.env.ProgramFiles;
+  const programFilesX86 = process.env["ProgramFiles(x86)"];
+  const localAppData = process.env.LOCALAPPDATA;
+  const candidates: Record<"edge" | "chrome", string[]> = {
+    edge: [
+      programFilesX86 && path.join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
+      programFiles && path.join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
+      localAppData && path.join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe")
+    ].filter((value): value is string => Boolean(value)),
+    chrome: [
+      programFiles && path.join(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
+      programFilesX86 && path.join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),
+      localAppData && path.join(localAppData, "Google", "Chrome", "Application", "chrome.exe")
+    ].filter((value): value is string => Boolean(value))
+  };
+  const selected = preferred ?? defaultWindowsBrowser();
+  const order: Array<"edge" | "chrome"> = selected
+    ? [selected, selected === "edge" ? "chrome" : "edge"]
+    : ["edge", "chrome"];
+  return order.flatMap((browser) => {
+    const executable = candidates[browser].find((candidate) => existsSync(candidate));
+    return executable ? [executable] : [];
+  });
+}
+
+function defaultWindowsBrowser(): "edge" | "chrome" | undefined {
+  try {
+    const output = execFileSync("reg.exe", [
+      "query",
+      "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice",
+      "/v",
+      "ProgId"
+    ], { encoding: "utf8", windowsHide: true });
+    const progId = output.match(/ProgId\s+REG_SZ\s+(\S+)/i)?.[1] ?? "";
+    if (/chrome/i.test(progId)) return "chrome";
+    if (/edge/i.test(progId)) return "edge";
+  } catch {
+    // Fall through to the installed-browser order.
+  }
+  return undefined;
+}
+
+async function handleCliBrowserRefresh(
+  socket: WebSocket,
+  message: CliBrowserRefreshMessage,
+  folder: vscode.WorkspaceFolder
+): Promise<void> {
+  if (!isSameOrInside(path.resolve(message.cwd), path.resolve(folder.uri.fsPath))) {
+    sendCliUpdate(socket, message.requestId, "error", `请在当前工作空间内运行 ${message.browser} refresh`, undefined, false);
+    return;
+  }
+  const browserSocket = selectBrowserSocket(message.browser);
+  if (!browserSocket) {
+    sendCliUpdate(socket, message.requestId, "error", `没有已连接的 ${message.browser} 浏览器扩展`, undefined, false);
+    return;
+  }
+  startCliAction(message.requestId, socket, browserSocket);
+  sendCliUpdate(socket, message.requestId, "preparing", `正在刷新 ${message.browser} 当前页面`);
+  send(browserSocket, { type: "reloadPage", protocolVersion: PROTOCOL_VERSION, requestId: message.requestId });
+}
+
+function validateCliTarget(
+  target: ActiveTarget | undefined,
+  cwdValue: string,
+  folder: vscode.WorkspaceFolder
+): string | undefined {
+  if (!target || target.socket.readyState !== WebSocket.OPEN) return "当前没有已连接的活动题目网页";
+  const workspacePath = path.resolve(folder.uri.fsPath);
+  const cwd = path.resolve(cwdValue);
+  const targetDirectory = path.dirname(path.resolve(target.fileUri.fsPath));
+  if (!isSameOrInside(cwd, workspacePath)) return "请在当前 Algo Sync 工作空间内运行该命令";
+  if (!isSameOrInside(target.fileUri.fsPath, cwd) && !isSameOrInside(cwd, targetDirectory)) {
+    return "终端目录与浏览器当前题目不匹配";
+  }
+  return undefined;
+}
+
+function selectBrowserSocket(browser?: "edge" | "chrome"): WebSocket | undefined {
+  const matches = Array.from(browserConnections.entries())
+    .filter(([socket, connection]) => socket.readyState === WebSocket.OPEN && (!browser || browserMatches(connection.userAgent, browser)))
+    .sort((left, right) => right[1].connectedAt - left[1].connectedAt);
+  if (!browser && activeTarget?.socket.readyState === WebSocket.OPEN) return activeTarget.socket;
+  return matches[0]?.[0];
+}
+
+function browserMatches(userAgent: string, browser: "edge" | "chrome"): boolean {
+  return browser === "edge" ? /\bEdg\//i.test(userAgent) : /\bChrome\//i.test(userAgent) && !/\bEdg\//i.test(userAgent);
+}
+
+function startCliAction(
+  requestId: string,
+  cliSocket: WebSocket,
+  browserSocket: WebSocket,
+  target?: ActiveTarget,
+  rollbackCode?: string,
+  resultLanguage?: Language
+): void {
+  const timeout = setTimeout(() => void finishCliAction(requestId, false, "等待浏览器响应超时"), 20_000);
+  pendingCliActions.set(requestId, { socket: cliSocket, browserSocket, timeout, target, rollbackCode, resultLanguage });
+}
+
+async function finishCliAction(requestId: string, ok: boolean, message: string): Promise<void> {
+  const pending = pendingCliActions.get(requestId);
+  if (!pending) return;
+  clearTimeout(pending.timeout);
+  pendingCliActions.delete(requestId);
+  if (!ok && pending.target && pending.rollbackCode !== undefined) {
+    try {
+      const document = await vscode.workspace.openTextDocument(pending.target.fileUri);
+      const end = document.lineAt(document.lineCount - 1).range.end;
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(pending.target.fileUri, new vscode.Range(new vscode.Position(0, 0), end), pending.rollbackCode);
+      const saveKey = normalizedPathKey(pending.target.fileUri.fsPath);
+      suppressedSavePaths.add(saveKey);
+      if (!await vscode.workspace.applyEdit(edit) || !await document.save()) {
+        suppressedSavePaths.delete(saveKey);
+        message = `${message}；本地代码回滚失败`;
+      } else {
+        setTimeout(() => suppressedSavePaths.delete(saveKey), 1_000);
+      }
+    } catch (error) {
+      message = `${message}；本地代码回滚失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  const resultTarget = pending.target && pending.resultLanguage
+    ? { ...pending.target, context: { ...pending.target.context, language: pending.resultLanguage } }
+    : pending.target;
+  sendCliUpdate(
+    pending.socket,
+    requestId,
+    ok ? "completed" : "error",
+    message,
+    resultTarget,
+    ok
+  );
+}
+
 async function handleBrowserMessage(
   socket: WebSocket,
   message: BrowserToWorkspaceMessage,
@@ -279,6 +653,11 @@ async function handleBrowserMessage(
   config: WorkspaceConfig
 ): Promise<void> {
   if (message.type === "hello") {
+    browserConnections.set(socket, { userAgent: message.browser, connectedAt: Date.now() });
+    const family = /\bEdg\//i.test(message.browser) ? "edge"
+      : /\bChrome\//i.test(message.browser) ? "chrome"
+        : undefined;
+    if (family) void extensionContextRef?.globalState.update(LAST_BROWSER_KEY, family);
     log(`浏览器握手成功：${message.extensionVersion}`);
     send(socket, {
       type: "ready",
@@ -286,6 +665,24 @@ async function handleBrowserMessage(
       workspaceName: folder.name,
       defaultLanguage: config.defaultLanguage
     });
+    return;
+  }
+  if (message.type === "browserActionResult") {
+    void finishCliAction(message.requestId, message.ok, message.message);
+    return;
+  }
+  if (message.type === "remoteProblemsResult") {
+    const pending = pendingCliActions.get(message.requestId);
+    if (!pending || pending.browserSocket !== socket) return;
+    if (message.problems.length === 0) {
+      void finishCliAction(message.requestId, false, "当前浏览器中没有已识别的远程题目");
+      return;
+    }
+    void finishCliAction(
+      message.requestId,
+      true,
+      formatRemoteProblems(message.problems, browserDisplayName(browserConnections.get(socket)?.userAgent))
+    );
     return;
   }
   if (message.type === "ping") {
@@ -306,7 +703,16 @@ async function handleBrowserMessage(
     const pending = pendingCliSubmissions.get(message.requestId);
     if (!pending || pending.tabId !== message.tabId) return;
     const target = activeTarget;
-    sendCliUpdate(pending.socket, message.requestId, message.phase, message.status, target, message.success);
+    sendCliUpdate(
+      pending.socket,
+      message.requestId,
+      message.phase,
+      message.status,
+      target,
+      message.success,
+      message.allAccepted,
+      message.testPoints
+    );
     log(`评测状态：${message.status}`);
     if (message.phase === "finished" || message.phase === "error") {
       clearTimeout(pending.timeout);
@@ -326,11 +732,13 @@ async function activateProblemFile(
   config: WorkspaceConfig
 ): Promise<void> {
   const context = message.context;
+  const previousFileUri = activeTarget?.fileUri;
   const siteDirectory = vscode.Uri.joinPath(folder.uri, config.solutionRoot, config.siteDirectories[context.site]);
   await vscode.workspace.fs.createDirectory(siteDirectory);
   const problemDirectory = await findOrCreateProblemDirectory(siteDirectory, context);
   const fileUri = await findOrCreateFile(problemDirectory, context);
   const statementUri = vscode.Uri.joinPath(problemDirectory, STATEMENT_FILENAME);
+  const initialUri = await ensureInitialTemplate(folder, context, fileUri.created);
   await updateStatementFile(statementUri, context);
   activeTarget = {
     key: problemKey(context),
@@ -338,16 +746,13 @@ async function activateProblemFile(
     context,
     fileUri: fileUri.uri,
     statementUri,
+    initialUri,
     socket
   };
   log(`活动目标：${context.site}/${context.problemId}/${context.language} -> ${fileUri.uri.fsPath}`);
   const document = await vscode.workspace.openTextDocument(fileUri.uri);
-  if (config.statementPreview) await showStatementPreview(statementUri);
-  await vscode.window.showTextDocument(document, {
-    preview: false,
-    preserveFocus: false,
-    viewColumn: config.statementPreview ? vscode.ViewColumn.Beside : undefined
-  });
+  if (config.statementPreview) await showStatementPreview(statementUri, folder, config);
+  await showSolutionDocument(document, config.statementPreview, previousFileUri);
   send(socket, {
     type: "localFileReady",
     protocolVersion: PROTOCOL_VERSION,
@@ -359,7 +764,60 @@ async function activateProblemFile(
     fileUri.created ? "$(new-file) Algo Sync" : "$(file-code) Algo Sync");
 }
 
-async function showStatementPreview(statementUri: vscode.Uri): Promise<void> {
+async function showSolutionDocument(
+  document: vscode.TextDocument,
+  statementPreview: boolean,
+  previousFileUri?: vscode.Uri
+): Promise<void> {
+  const matchingTabs = textTabsFor(document.uri);
+  // Column one belongs exclusively to the statement and its preview. Never
+  // reuse a solution tab that was manually dragged there or left there by an
+  // older release.
+  const keep = matchingTabs.find(({ group }) => group.viewColumn !== vscode.ViewColumn.One);
+  const previous = previousFileUri
+    ? textTabsFor(previousFileUri).find(({ group }) => group.viewColumn !== vscode.ViewColumn.One)
+    : undefined;
+  const targetColumn = keep?.group.viewColumn ?? previous?.group.viewColumn ??
+    (statementPreview ? vscode.ViewColumn.Two : undefined);
+  await vscode.window.showTextDocument(document, {
+    preview: false,
+    preserveFocus: false,
+    viewColumn: targetColumn
+  });
+
+  // Opening the shared document in the target group preserves an unsaved
+  // buffer. It is now safe to remove stale copies, including one in column one.
+  const openedTabs = textTabsFor(document.uri);
+  const retained = openedTabs.find(({ group }) => group.viewColumn === targetColumn) ?? openedTabs[0];
+  const duplicates = openedTabs.filter(({ tab }) => tab !== retained?.tab).map(({ tab }) => tab);
+  if (duplicates.length > 0) await vscode.window.tabGroups.close(duplicates, true);
+}
+
+function textTabsFor(uri: vscode.Uri): Array<{ group: vscode.TabGroup; tab: vscode.Tab }> {
+  const key = uri.toString();
+  return vscode.window.tabGroups.all
+    .flatMap((group) => group.tabs
+      .filter((tab) => tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === key)
+      .map((tab) => ({ group, tab })))
+    .sort((left, right) => left.group.viewColumn - right.group.viewColumn);
+}
+
+function showStatementPreview(
+  statementUri: vscode.Uri,
+  folder: vscode.WorkspaceFolder,
+  config: WorkspaceConfig
+): Promise<void> {
+  const operation = statementPreviewQueue.then(() => showStatementPreviewNow(statementUri, folder, config));
+  statementPreviewQueue = operation.catch(() => undefined);
+  return operation;
+}
+
+async function showStatementPreviewNow(
+  statementUri: vscode.Uri,
+  folder: vscode.WorkspaceFolder,
+  config: WorkspaceConfig
+): Promise<void> {
+  await closeStatementGroupTabs(statementUri, folder, config);
   const statementDocument = await vscode.workspace.openTextDocument(statementUri);
   await vscode.window.showTextDocument(statementDocument, {
     preview: true,
@@ -377,6 +835,43 @@ async function showStatementPreview(statementUri: vscode.Uri): Promise<void> {
     void vscode.window.showWarningMessage(`Algo Sync：增强题面预览不可用，已使用内置预览。${message}`);
     await vscode.commands.executeCommand("markdown.showPreview", statementUri);
   }
+}
+
+async function closeStatementGroupTabs(
+  currentStatementUri: vscode.Uri,
+  _folder: vscode.WorkspaceFolder,
+  _config: WorkspaceConfig
+): Promise<void> {
+  const leftGroup = vscode.window.tabGroups.all.find((group) => group.viewColumn === vscode.ViewColumn.One);
+  if (!leftGroup) return;
+  const tabsToClose: vscode.Tab[] = [];
+  let keptCurrentStatement = false;
+  for (const tab of leftGroup.tabs) {
+    if (tab.input instanceof vscode.TabInputWebview &&
+      isStatementPreviewTab(tab.input.viewType, tab.label)) {
+      tabsToClose.push(tab);
+      continue;
+    }
+    if (!(tab.input instanceof vscode.TabInputText)) continue;
+    const uri = tab.input.uri;
+    if (uri.toString() === currentStatementUri.toString() && !keptCurrentStatement) {
+      keptCurrentStatement = true;
+      continue;
+    }
+    // Clean files can simply be closed. Dirty files are first opened in the
+    // solution group so the same TextDocument (and every unsaved edit) stays
+    // alive when its stale left-side tab is removed.
+    if (tab.isDirty) {
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document, {
+        preview: false,
+        preserveFocus: true,
+        viewColumn: vscode.ViewColumn.Two
+      });
+    }
+    tabsToClose.push(tab);
+  }
+  if (tabsToClose.length > 0) await vscode.window.tabGroups.close(tabsToClose, true);
 }
 
 async function findOrCreateFile(
@@ -431,7 +926,43 @@ async function updateStatementFile(uri: vscode.Uri, context: ProblemContext): Pr
   log(`题面文件已更新：${uri.fsPath}，${context.statementMarkdown?.length ?? 0} 字符`);
 }
 
+async function ensureInitialTemplate(
+  folder: vscode.WorkspaceFolder,
+  context: ProblemContext,
+  solutionCreated: boolean
+): Promise<vscode.Uri> {
+  const directory = vscode.Uri.joinPath(
+    folder.uri,
+    ".algo-sync-cache",
+    "templates",
+    context.site,
+    sanitizePathPart(context.problemId, "problem", 100)
+  );
+  const uri = vscode.Uri.joinPath(directory, `${context.language}.txt`);
+  let existing: string | undefined;
+  try {
+    existing = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+  } catch {
+    // The template may be created below.
+  }
+  const initialCode = resolveInitialTemplate(
+    context.initialCode,
+    context.site
+  );
+  if (initialCode !== undefined && initialCode !== existing) {
+    await vscode.workspace.fs.createDirectory(directory);
+    await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(initialCode));
+    log(`已更新初始代码模板：${context.site}/${context.problemId}/${context.language}`);
+  }
+  return uri;
+}
+
 async function handleSavedDocument(document: vscode.TextDocument): Promise<void> {
+  const saveKey = normalizedPathKey(document.uri.fsPath);
+  if (suppressedSavePaths.delete(saveKey)) {
+    log(`保存未同步（由 acm refresh 管理）：${document.uri.fsPath}`);
+    return;
+  }
   const target = activeTarget;
   if (!target) {
     log(`保存未同步（没有活动网页题目）：${document.uri.fsPath}`);
@@ -468,7 +999,9 @@ function sendCliUpdate(
   phase: CliUpdateMessage["phase"],
   statusMessage: string,
   target?: ActiveTarget,
-  success?: boolean
+  success?: boolean,
+  allAccepted?: boolean,
+  testPoints?: TestPointResult[]
 ): void {
   sendRaw(socket, {
     type: "cliUpdate",
@@ -479,7 +1012,9 @@ function sendCliUpdate(
     site: target?.context.site,
     problemId: target?.context.problemId,
     language: target?.context.language,
-    success
+    success,
+    allAccepted,
+    testPoints
   } satisfies CliUpdateMessage);
 }
 
@@ -502,6 +1037,17 @@ function sendRaw(socket: WebSocket, message: object): void {
 function isSameOrInside(candidate: string, parent: string): boolean {
   const relative = path.relative(path.resolve(parent), path.resolve(candidate));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function normalizedPathKey(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function browserDisplayName(userAgent?: string): string {
+  return userAgent && /\bEdg\//i.test(userAgent) ? "Edge"
+    : userAgent && /\bChrome\//i.test(userAgent) ? "Chrome"
+      : "浏览器";
 }
 
 function setStatus(detail: string, label: string): void {

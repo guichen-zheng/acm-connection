@@ -14,7 +14,9 @@ if (process.platform === "win32") {
   const globalPrefix = execFileSync(process.execPath, [npmCli, "prefix", "--global"], { encoding: "utf8" }).trim();
   // If PowerShell's execution policy blocks npm's .ps1 shim, command lookup
   // can still use the equivalent .cmd launcher without changing user policy.
-  await rm(path.join(globalPrefix, "acm.ps1"), { force: true });
+  for (const command of ["acm", "edge", "chrome"]) {
+    await rm(path.join(globalPrefix, `${command}.ps1`), { force: true });
+  }
 }
 
 function run(cwd, args) {

@@ -2,8 +2,8 @@ node_modules/
 packages/*/dist/
 dist/
 coverage/
+.algo-sync-cache/
 *.vsix
 *.log
 .DS_Store
 Thumbs.db
-

@@ -3,15 +3,46 @@ import {
   GENERATED_END,
   GENERATED_START,
   existingFilePrefix,
+  formatRemoteProblems,
+  isStatementPreviewTab,
   mergeStatementMarkdown,
   normalizeRelativeDirectory,
   problemDirectoryName,
+  resolveInitialTemplate,
   sameFile,
+  shouldDispatchLanguageSwitch,
   shouldSyncSavedFile,
   solutionFilename
 } from "./core";
 
 describe("workspace file rules", () => {
+  it("formats active and background remote problems", () => {
+    expect(formatRemoteProblems([{
+      tabId: 7,
+      active: true,
+      site: "leetcode",
+      problemId: "34",
+      title: "在排序数组中查找元素的第一个和最后一个位置",
+      language: "python",
+      url: "https://leetcode.cn/problems/find-first-and-last-position-of-element-in-sorted-array/"
+    }, {
+      tabId: 9,
+      active: false,
+      site: "luogu",
+      problemId: "P1115",
+      title: "最大子段和",
+      language: "cpp",
+      url: "https://www.luogu.com.cn/problem/P1115"
+    }], "Edge")).toContain("* leetcode/34/python");
+  });
+
+  it("recognizes statement previews without matching unrelated webviews", () => {
+    expect(isStatementPreviewTab("markdown-preview-enhanced", "Preview 题目.md")).toBe(true);
+    expect(isStatementPreviewTab("markdown.preview", "题目.md 预览")).toBe(true);
+    expect(isStatementPreviewTab("markdown-preview-enhanced", "Preview README.md")).toBe(false);
+    expect(isStatementPreviewTab("terminal", "题目.md")).toBe(false);
+  });
+
   it("sanitizes a Windows-incompatible title", () => {
     expect(solutionFilename("P1002", "A/B: C?*", "cpp")).toBe("P1002-A-B- C-.cpp");
   });
@@ -99,5 +130,26 @@ describe("workspace file rules", () => {
     expect(shouldSyncSavedFile("C:\\work\\luogu\\P1003-铺地毯\\P1003-铺地毯.cpp", active, "win32")).toBe(false);
     expect(shouldSyncSavedFile("C:\\work\\luogu\\P1002-过河卒\\题目.md", active, "win32")).toBe(false);
     expect(shouldSyncSavedFile(active, undefined, "win32")).toBe(false);
+  });
+
+  it("replaces a stale refresh snapshot with the browser's authoritative template", () => {
+    expect(resolveInitialTemplate("", "nowcoder")).toBe("");
+    expect(resolveInitialTemplate("class Solution {}", "leetcode")).toBe("class Solution {}");
+  });
+
+  it("does not trust an old snapshot when the browser cannot expose a template", () => {
+    expect(resolveInitialTemplate(undefined, "nowcoder")).toBeUndefined();
+  });
+
+  it("never treats a restored current buffer as a pristine template", () => {
+    expect(resolveInitialTemplate(undefined, "nowcoder")).toBeUndefined();
+    expect(resolveInitialTemplate(undefined, "leetcode")).toBeUndefined();
+    expect(resolveInitialTemplate(undefined, "luogu")).toBe("");
+  });
+
+  it("rechecks Nowcoder Python so Python2 can be corrected to Python3", () => {
+    expect(shouldDispatchLanguageSwitch("nowcoder", "python", "python")).toBe(true);
+    expect(shouldDispatchLanguageSwitch("luogu", "python", "python")).toBe(false);
+    expect(shouldDispatchLanguageSwitch("luogu", "python", "cpp")).toBe(true);
   });
 });

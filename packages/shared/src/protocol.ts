@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 3 as const;
+export const PROTOCOL_VERSION = 7 as const;
 export const DEFAULT_PORT = 27121;
 export const BROWSER_EXTENSION_ID = "bpbicpjghnomlgogenedfkflejaggmfo";
 export const CLI_ORIGIN = "algo-sync-cli://local";
@@ -26,6 +26,7 @@ export interface ProblemContext {
   url: string;
   language: Language;
   code: string;
+  initialCode?: string;
   statementMarkdown?: string;
 }
 
@@ -76,7 +77,14 @@ export interface ApplyResultMessage {
   message?: string;
 }
 
-export type SubmissionPhase = "preparing" | "submitted" | "judging" | "finished" | "error";
+export type SubmissionPhase = "preparing" | "attention" | "submitted" | "judging" | "finished" | "completed" | "error";
+
+export interface TestPointResult {
+  id: string;
+  verdict: string;
+  time?: string;
+  memory?: string;
+}
 
 export interface SubmitCodeMessage {
   type: "submitCode";
@@ -97,6 +105,67 @@ export interface SubmissionUpdateMessage {
   phase: SubmissionPhase;
   status: string;
   success?: boolean;
+  allAccepted?: boolean;
+  testPoints?: TestPointResult[];
+}
+
+export interface ResetCodeMessage extends Omit<SavedCodeMessage, "type"> {
+  type: "resetCode";
+  requestId: string;
+}
+
+export interface NavigateToProblemMessage {
+  type: "navigateToProblem";
+  protocolVersion: number;
+  requestId: string;
+  problemCode: string;
+}
+
+export interface ReloadPageMessage {
+  type: "reloadPage";
+  protocolVersion: number;
+  requestId: string;
+}
+
+export interface BrowserActionResultMessage {
+  type: "browserActionResult";
+  protocolVersion: number;
+  requestId: string;
+  ok: boolean;
+  message: string;
+}
+
+export interface RemoteProblemSummary {
+  tabId: number;
+  active: boolean;
+  site: Site;
+  problemId: string;
+  title: string;
+  language: Language;
+  url: string;
+}
+
+export interface ListRemoteProblemsMessage {
+  type: "listRemoteProblems";
+  protocolVersion: number;
+  requestId: string;
+}
+
+export interface RemoteProblemsResultMessage {
+  type: "remoteProblemsResult";
+  protocolVersion: number;
+  requestId: string;
+  problems: RemoteProblemSummary[];
+}
+
+export interface SwitchLanguageMessage {
+  type: "switchLanguage";
+  protocolVersion: number;
+  requestId: string;
+  tabId: number;
+  site: Site;
+  problemId: string;
+  language: Language;
 }
 
 export interface CliPushMessage {
@@ -104,6 +173,44 @@ export interface CliPushMessage {
   protocolVersion: number;
   requestId: string;
   cwd: string;
+}
+
+export interface CliRefreshMessage {
+  type: "cliRefresh";
+  protocolVersion: number;
+  requestId: string;
+  cwd: string;
+}
+
+export interface CliFetchMessage {
+  type: "cliFetch";
+  protocolVersion: number;
+  requestId: string;
+  cwd: string;
+  problemCode: string;
+}
+
+export interface CliBrowserRefreshMessage {
+  type: "cliBrowserRefresh";
+  protocolVersion: number;
+  requestId: string;
+  cwd: string;
+  browser: "edge" | "chrome";
+}
+
+export interface CliRemoteMessage {
+  type: "cliRemote";
+  protocolVersion: number;
+  requestId: string;
+  cwd: string;
+}
+
+export interface CliSwitchMessage {
+  type: "cliSwitch";
+  protocolVersion: number;
+  requestId: string;
+  cwd: string;
+  language: Language;
 }
 
 export interface CliUpdateMessage {
@@ -116,6 +223,8 @@ export interface CliUpdateMessage {
   problemId?: string;
   language?: Language;
   success?: boolean;
+  allAccepted?: boolean;
+  testPoints?: TestPointResult[];
 }
 
 export interface ErrorMessage {
@@ -135,6 +244,8 @@ export type BrowserToWorkspaceMessage =
   | ActiveEditorChangedMessage
   | ApplyResultMessage
   | SubmissionUpdateMessage
+  | BrowserActionResultMessage
+  | RemoteProblemsResultMessage
   | PingMessage;
 
 export type WorkspaceToBrowserMessage =
@@ -142,10 +253,16 @@ export type WorkspaceToBrowserMessage =
   | LocalFileReadyMessage
   | SavedCodeMessage
   | SubmitCodeMessage
+  | ResetCodeMessage
+  | NavigateToProblemMessage
+  | ReloadPageMessage
+  | ListRemoteProblemsMessage
+  | SwitchLanguageMessage
   | ErrorMessage
   | PingMessage;
 
-export type CliToWorkspaceMessage = CliPushMessage | PingMessage;
+export type CliToWorkspaceMessage = CliPushMessage | CliRefreshMessage | CliFetchMessage | CliBrowserRefreshMessage |
+  CliRemoteMessage | CliSwitchMessage | PingMessage;
 export type WorkspaceToCliMessage = CliUpdateMessage | ErrorMessage | PingMessage;
 
 export function isSite(value: unknown): value is Site {
@@ -166,6 +283,8 @@ export function isProblemContext(value: unknown): value is ProblemContext {
     isLanguage(value.language) &&
     typeof value.code === "string" &&
     value.code.length <= 2_000_000 &&
+    (value.initialCode === undefined ||
+      (typeof value.initialCode === "string" && value.initialCode.length <= 2_000_000)) &&
     (value.statementMarkdown === undefined ||
       (typeof value.statementMarkdown === "string" && value.statementMarkdown.length <= 1_000_000))
   );
@@ -193,8 +312,21 @@ export function parseBrowserMessage(raw: unknown): BrowserToWorkspaceMessage | u
   }
   if (raw.type === "submissionUpdate") {
     return isRequestId(raw.requestId) && Number.isInteger(raw.tabId) && isSubmissionPhase(raw.phase) &&
-      isBoundedText(raw.status, 2_000) && (raw.success === undefined || typeof raw.success === "boolean")
+      isBoundedText(raw.status, 2_000) && (raw.success === undefined || typeof raw.success === "boolean") &&
+      (raw.allAccepted === undefined || typeof raw.allAccepted === "boolean") &&
+      (raw.testPoints === undefined || isTestPointResults(raw.testPoints))
       ? (raw as unknown as SubmissionUpdateMessage)
+      : undefined;
+  }
+  if (raw.type === "browserActionResult") {
+    return isRequestId(raw.requestId) && typeof raw.ok === "boolean" && isBoundedText(raw.message, 2_000)
+      ? (raw as unknown as BrowserActionResultMessage)
+      : undefined;
+  }
+  if (raw.type === "remoteProblemsResult") {
+    return isRequestId(raw.requestId) && Array.isArray(raw.problems) && raw.problems.length <= 200 &&
+      raw.problems.every(isRemoteProblemSummary)
+      ? (raw as unknown as RemoteProblemsResultMessage)
       : undefined;
   }
   if (raw.type === "ping" || raw.type === "pong") return raw as unknown as PingMessage;
@@ -203,9 +335,25 @@ export function parseBrowserMessage(raw: unknown): BrowserToWorkspaceMessage | u
 
 export function parseCliMessage(raw: unknown): CliToWorkspaceMessage | undefined {
   if (!isRecord(raw) || raw.protocolVersion !== PROTOCOL_VERSION || typeof raw.type !== "string") return undefined;
-  if (raw.type === "cliPush") {
+  if (raw.type === "cliPush" || raw.type === "cliRefresh" || raw.type === "cliRemote") {
     return isRequestId(raw.requestId) && isBoundedText(raw.cwd, 4_096)
-      ? (raw as unknown as CliPushMessage)
+      ? (raw as unknown as CliPushMessage | CliRefreshMessage | CliRemoteMessage)
+      : undefined;
+  }
+  if (raw.type === "cliFetch") {
+    return isRequestId(raw.requestId) && isBoundedText(raw.cwd, 4_096) && isBoundedText(raw.problemCode, 80)
+      ? (raw as unknown as CliFetchMessage)
+      : undefined;
+  }
+  if (raw.type === "cliBrowserRefresh") {
+    return isRequestId(raw.requestId) && isBoundedText(raw.cwd, 4_096) &&
+      (raw.browser === "edge" || raw.browser === "chrome")
+      ? (raw as unknown as CliBrowserRefreshMessage)
+      : undefined;
+  }
+  if (raw.type === "cliSwitch") {
+    return isRequestId(raw.requestId) && isBoundedText(raw.cwd, 4_096) && isLanguage(raw.language)
+      ? (raw as unknown as CliSwitchMessage)
       : undefined;
   }
   if (raw.type === "ping" || raw.type === "pong") return raw as unknown as PingMessage;
@@ -233,8 +381,21 @@ function isRequestId(value: unknown): value is string {
 }
 
 function isSubmissionPhase(value: unknown): value is SubmissionPhase {
-  return value === "preparing" || value === "submitted" || value === "judging" ||
-    value === "finished" || value === "error";
+  return value === "preparing" || value === "attention" || value === "submitted" || value === "judging" ||
+    value === "finished" || value === "completed" || value === "error";
+}
+
+function isTestPointResults(value: unknown): value is TestPointResult[] {
+  return Array.isArray(value) && value.length <= 1_000 && value.every((point) => isRecord(point) &&
+    isBoundedText(point.id, 32) && isBoundedText(point.verdict, 32) &&
+    (point.time === undefined || isBoundedText(point.time, 64)) &&
+    (point.memory === undefined || isBoundedText(point.memory, 64)));
+}
+
+function isRemoteProblemSummary(value: unknown): value is RemoteProblemSummary {
+  return isRecord(value) && Number.isInteger(value.tabId) && typeof value.active === "boolean" &&
+    isSite(value.site) && isSafeText(value.problemId, 160) && isSafeText(value.title, 300) &&
+    isLanguage(value.language) && isHttpUrl(value.url);
 }
 
 function isHttpUrl(value: unknown): value is string {

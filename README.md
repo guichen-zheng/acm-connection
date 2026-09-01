@@ -1,80 +1,349 @@
 # Algo Sync Workspace
 
-一个只在指定 VS Code 工作空间中启用的刷题代码同步工具。进入受支持网站的代码编辑器后，它会为每道题建立独立目录，把题面保存为 Markdown，并创建或打开当前语言的代码文件；保存当前代码文件时，再把代码写回当前浏览器题目。
+Algo Sync 是一个只在指定 VS Code 工作空间中启用的本地刷题工具。它连接浏览器（edge）中的在线评测 IDE 与本地 VS Code，让题面、代码、语言切换、提交和评测结果可以通过同一套工作流完成。
+这个库主要为懒人打造，懒得复制粘贴写完的代码。使用这个需要一定的命令行基础，也算是给终端人的福利吧。
 
-## 支持范围
+## 这个工作空间能做什么
 
-- 洛谷：`www.luogu.com.cn/problem/*`
-- 牛客 ACM：`ac.nowcoder.com/acm/problem/*`
-- 牛客练习题：`www.nowcoder.com/practice/*`
-- 力扣中国站：`leetcode.cn/problems/*`
-- 信息学奥赛一本通：`ybt.ssoier.cn` 的题目与提交页面
-- 语言：C++、C、Python、Java、JavaScript、Go、Rust
+### 自动建立本地题目目录
 
-`biteketang.com` 是课程分享页面，不属于在线评测 IDE，因此不会注入扩展。
+浏览器进入受支持网站的题目 IDE 后，工具会读取题号、题名、题面、当前语言和编辑器代码，并创建对应目录：
 
-## 首次安装
+```text
+luogu/
+└─ P1002-过河卒/
+   ├─ P1002-过河卒.cpp
+   └─ 题目.md
+```
 
-需要 Node.js 20 或更新版本，以及 VS Code 1.100 或更新版本。VSIX 声明了 `shd101wyy.markdown-preview-enhanced` 为扩展依赖；联网安装时 VS Code 会自动补齐该依赖。
+左侧编辑组只保留当前题目的 `题目.md` 和题面预览，代码文件显示在右侧。切换语言时，同一道题的 `.cpp`、`.py`、`.java` 等文件共用一个题目目录。
 
-在仓库根目录运行：
+### 在本地与网页之间同步代码
+
+- 在 VS Code 保存当前代码文件时，代码会写入浏览器当前连接的同一道题、同一种语言的编辑器。
+- 普通保存只同步代码，不会提交。
+- 已存在的本地代码文件不会因为重新打开题目而被自动覆盖。
+- `题目.md` 的自动生成区域会更新；生成标记之外的个人内容会保留。
+
+### 使用终端管理刷题流程
+
+- `acm fetch <题号>`：在专用浏览器标签页中打开题目并进入可编辑页面。
+- `acm remote`：查看浏览器扩展当前识别到的远端题目，并确认哪一道题处于活动状态。
+- `acm switch <语言>`：同时切换网页语言和本地代码文件。
+- `acm refresh`：把当前语言的网页代码和本地文件恢复为初始模板。
+- `acm push`：提交本地当前代码，并在终端等待评测结果。
+- `edge refresh` / `chrome refresh`：刷新对应浏览器的当前页面。
+- `acm clean <站点>`：清理一个完整的算法网站目录。
+
+### 支持的网站和语言
+
+| 网站 | 支持的页面 |
+| --- | --- |
+| 洛谷 | `www.luogu.com.cn/problem/*` |
+| 牛客 ACM | `ac.nowcoder.com/acm/problem/*` |
+| 力扣 | `leetcode.cn/problems/*` |
+自动同步支持 C++、C、Python、Java、JavaScript、Go 和 Rust。终端语言切换命令支持 `python`、`python3`、`java`、`cpp`、`c++` 和 `c`。
+
+## 使用前需要安装什么
+
+以下命令以 Windows PowerShell 为例。
+
+### 1. 安装基础软件
+
+需要：
+
+- Node.js 20 或更新版本；
+- VS Code 1.100 或更新版本；
+- Edge；
+- Git（只有需要克隆或维护仓库时才必需）。
+
+可以使用 Windows Package Manager 安装：
 
 ```powershell
+winget install --exact --id OpenJS.NodeJS.LTS
+winget install --exact --id Microsoft.VisualStudioCode
+winget install --exact --id Git.Git
+```
+
+Windows 10/11 通常已经包含 Edge。如果需要 Chrome：
+
+```powershell
+winget install --exact --id Google.Chrome
+```
+
+安装完成后重新打开终端并检查：
+
+```powershell
+node --version
+npm.cmd --version
+code.cmd --version
+```
+
+`node --version` 应为 `v20` 或更高版本。
+
+### 2. 安装项目依赖并构建
+
+进入本仓库根目录：
+
+```powershell
+Set-Location C:\Users\lenovo\Desktop\acm
 npm.cmd install
 npm.cmd run build
 npm.cmd run package:vscode
 npm.cmd run install:cli
 ```
 
-随后安装两端扩展：
+这些命令会：
 
-1. 在 VS Code 中执行 `Extensions: Install from VSIX...`，选择 `dist/algo-sync-vscode.vsix`。
-2. Chrome 打开 `chrome://extensions`，Edge 打开 `edge://extensions`。
-3. 开启“开发者模式”，选择“加载已解压的扩展”，指向 `packages/browser-extension/dist`。
-4. Chrome 和 Edge 可以加载同一个目录；固定的 manifest 公钥会使扩展 ID 保持一致。
-5. 重新打开终端，运行 `acm --version`；输出 `0.4.0` 表示命令行工具安装完成。`acm` 由 npm 生成跨平台启动器，可在 PowerShell、CMD 和 Bash 中使用。
+1. 下载项目依赖；
+2. 构建浏览器扩展、命令行工具和 VS Code 扩展；
+3. 在 `dist/algo-sync-vscode.vsix` 生成 VS Code 安装包；
+4. 安装 `acm`、`edge` 和 `chrome` 命令行启动器。
 
-所有命令和配置均使用仓库相对路径。克隆到其他目录后重新运行上述命令即可。
+在 macOS 或 Linux 中使用 `npm` 代替 `npm.cmd`。
 
-## 使用方法
+### 3. 安装 VS Code 扩展
 
-1. 使用 VS Code 打开 `acm.code-workspace`，或直接打开包含 `.algo-sync.json` 的仓库根目录。
-2. 浏览器扩展徽标显示 `ON`，VS Code 状态栏显示 `Algo Sync`，表示两端已连接。
-3. 在受支持网站进入真正包含代码编辑器的 IDE/提交页面。只浏览题面不会创建文件。
-4. 第一次进入某题时，网页语言会切换为配置的默认语言 `cpp`，并建立题目目录、题面和代码，例如：
+先安装 Markdown Preview Enhanced，再安装本项目生成的 VSIX：
 
-   ```text
-   luogu/
-   └─ P1002-过河卒/
-      ├─ P1002-过河卒.cpp
-      └─ 题目.md
-   ```
-5. 如果同一题同一语言的文件已存在，只会打开它；本地和网页内容都不会被自动覆盖。
-6. 在网页中手动切换到其他受支持语言后，会在同一题目目录中创建或打开 `.py`、`.java` 等对应文件。
-7. 在 VS Code 保存文件时，只有“最近激活的浏览器 IDE 标签页 + 同一题目 + 同一语言”完全匹配的文件才会同步。使用“全部保存”不会更新其他题目。
-8. 扩展默认在左侧打开 `题目.md` 的 VS Code 原生 Markdown 预览，在右侧打开代码。关闭预览后可运行 `Algo Sync: Show Problem Statement` 重新打开。
+```powershell
+code.cmd --install-extension shd101wyy.markdown-preview-enhanced
+code.cmd --install-extension .\dist\algo-sync-vscode.vsix --force
+```
 
-### 命令行提交
+也可以在 VS Code 中执行 `Extensions: Install from VSIX...`，然后选择 `dist/algo-sync-vscode.vsix`。
 
-保持 VS Code 工作空间和浏览器中的目标题目页面打开，在仓库根目录、站点目录或当前题目目录运行：
+安装或更新 VSIX 后，执行 `Developer: Reload Window`。
+
+### 4. 加载浏览器扩展
+
+1. Edge 打开 `edge://extensions`。
+2. 开启“开发者模式”。
+3. 点击“加载已解压的扩展”。
+4. 选择本仓库的 `packages/browser-extension/dist` 目录。
+
+浏览器扩展代码更新后，必须在扩展管理页点击“重新加载”，并刷新已经打开的题目页面；只重新构建文件不会更新浏览器里正在运行的旧扩展。
+
+### 5. 验证安装
+
+```powershell
+acm --version
+```
+
+当前版本应输出：
 
 ```text
+0.6.20
+```
+
+## 第一次连接
+
+### 1. 打开正确的 VS Code 工作空间
+
+在仓库根目录运行：
+
+```powershell
+code.cmd .\acm.code-workspace
+```
+
+也可以直接用 VS Code 打开包含 `.algo-sync.json` 的仓库根目录。只有这个工作空间打开并启用时，浏览器扩展才会同步代码。
+
+### 2. 确认两端已经连接
+
+- VS Code 状态栏显示 `Algo Sync`；
+- 浏览器扩展徽标显示 `ON`；
+- 浏览器已经打开受支持网站的真实 IDE/代码编辑页面。
+
+只打开题面但没有进入代码编辑模式时，扩展可能不会创建本地文件。洛谷使用 `acm fetch` 时会直接进入 `#ide` 模式。
+
+### 3. 检查远端题目
+
+```powershell
+acm remote
+```
+
+输出中的 `*` 表示当前活动的远端题目，例如：
+
+```text
+Edge 远程题目（2）：
+* luogu/P1002/cpp · 过河卒
+  https://www.luogu.com.cn/problem/P1002
+- leetcode/34/python · 在排序数组中查找元素的第一个和最后一个位置
+  https://leetcode.cn/problems/find-first-and-last-position-of-element-in-sorted-array/
+```
+
+执行 `acm push`、`acm refresh` 或 `acm switch` 前，必须确认带 `*` 的记录符合以下四项：
+
+1. 网站正确；
+2. 题号正确；
+3. 语言正确；
+4. URL 确实是准备操作的题目。
+
+如果活动题目不正确，不要继续提交或恢复。先运行 `acm fetch <题号>`，等待页面加载，再次运行 `acm remote` 确认。
+
+## 使用说明
+
+所有命令都应在本工作空间根目录、对应站点目录或当前题目目录中运行。不要在另一个同名仓库或无 `.algo-sync.json` 的目录中运行。
+
+### 打开题目：`acm fetch`
+
+```powershell
+acm fetch P1001
+acm fetch NC233601
+acm fetch LC1
+```
+
+支持的题号格式：
+
+- 洛谷：`P`、`B`、`U`、`T`、`CF`、`AT_`、`SP`、`UVA` 开头的规定格式；
+- 牛客：仅 `NC+数字`；
+- 力扣：仅 `LC+数字`。
+
+`fetch` 使用一个带内部标记的专用浏览器标签页：
+
+- 第一次调用会创建标签页；
+- 后续调用复用同一个标签页并切换网址；
+- 浏览器没有运行时会尝试启动上次连接的 Edge/Chrome；
+- 正常情况下不会把浏览器窗口移动到桌面最前方；
+- 页面加载完成后会自动生成题面和默认 C++ 文件。
+
+打开后必须确认：
+
+```powershell
+acm remote
+```
+
+### 编辑和保存
+
+在右侧代码文件中编辑，正常保存即可同步到网页编辑器。同步要求以下内容全部一致：
+
+- 最近激活的浏览器 IDE 标签页；
+- 网站和题号；
+- 网页当前语言；
+- VS Code 当前代码文件。
+
+如果其中任意一项不一致，工具会拒绝写入，避免把代码覆盖到别的题目。使用“全部保存”也不会把其他题目的文件写入当前网页。
+
+### 查看远端连接：`acm remote`
+
+```powershell
+acm remote
+```
+
+建议在以下操作前都运行一次：
+
+- 提交前；
+- 恢复模板前；
+- 切换语言前；
+- 同时打开多个题目或多个浏览器时；
+- 刚执行 `fetch`、浏览器刷新或扩展重新加载后。
+
+不要只根据 VS Code 当前打开的文件判断远端题目；真正的操作目标以 `acm remote` 中带 `*` 的记录为准。
+
+### 切换语言：`acm switch`
+
+```powershell
+acm switch python
+acm switch python3
+acm switch java
+acm switch cpp
+acm switch c++
+acm switch c
+```
+
+命令会切换活动题目的网页语言，并创建或打开相应的本地文件。`python` 和 `python3` 都选择 Python 3；`c++` 等价于 `cpp`。
+
+切换完成后建议再次检查：
+
+```powershell
+acm remote
+```
+
+如果网站不支持该语言、菜单没有加载完成或远端题目不正确，命令会返回错误，不应继续提交。
+
+### 恢复初始模板：`acm refresh`
+
+```powershell
+acm remote
+acm refresh
+```
+
+`refresh` 会同时替换：
+
+- 浏览器当前题目、当前语言的代码；
+- 对应的本地代码文件。
+
+> 这是覆盖操作。运行前必须核对 `acm remote`，并自行备份仍需保留的代码。
+
+工具只使用首次创建文件时保存的可信初始模板，不会把上次提交代码猜成模板。旧文件没有可信模板快照时，命令会报错并拒绝覆盖。
+
+### 提交并等待评测：`acm push`
+
+推荐流程：
+
+```powershell
+acm remote
 acm push
 ```
 
-CLI 会读取 VS Code 中当前题目代码（包括尚未落盘但仍在编辑器中的内容），再次校验终端目录、浏览器题目和语言完全匹配，然后把代码写入网页并点击提交。终端会依次显示“准备”“已提交”“评测”，最后显示 Accepted、Wrong Answer、编译错误等网站返回的结果。通过时退出码为 `0`，未通过、超时或连接错误时退出码为 `1`。
+确认带 `*` 的网站、题号和语言全部正确后再执行 `push`。CLI 会再次校验终端目录、本地文件和远端题目是否匹配，然后：
 
-命令不会绕过登录、验证码或网站自身的提交限制。如果网页弹出验证码，需先在浏览器中处理后重新运行。评测期间不要关闭对应标签页；对于提交后跳转到记录页的网站，扩展会在新页面继续读取结果。
+1. 读取 VS Code 中当前代码，包括尚未落盘但仍在编辑器中的内容；
+2. 写入网页编辑器；
+3. 点击网站提交按钮；
+4. 等待并显示 Accepted、Wrong Answer、TLE、MLE、RE、CE 等结果；
+5. 在支持的网站上显示测试点状态、耗时和内存。
 
-题面预览直接调用 Markdown Preview Enhanced，并使用 `github-light.css` 白色主题。如果它尚未安装，安装 Algo Sync 时 VS Code 会一并安装。
+评测通过时退出码为 `0`；未通过、连接失败或等待超时时退出码为 `1`。
 
-`题目.md` 中的 `algo-sync:generated` 标记区由扩展自动更新。扩展不再添加“个人笔记”标题；标记区外已有的任何内容仍不会被覆盖。已有且没有标记的 Markdown 文件也会完整保留，并在其前方添加独立的自动题面区。
+提交期间不要关闭题目标签页。如果网站确实要求验证码，终端会显示黄色提示，并可能激活浏览器供用户完成验证。工具不会绕过登录、验证码或网站提交限制。
 
-关闭该工作空间后，浏览器扩展会进入休眠状态：不会创建文件、读取代码或自动切换网页语言。
+### 刷新浏览器页面
+
+```powershell
+edge refresh
+chrome refresh
+```
+
+命令只刷新对应浏览器当前连接的页面，不应改变浏览器窗口在桌面上的前后顺序。浏览器必须已经加载 Algo Sync 扩展并连接到当前工作空间。
+
+刷新后运行 `acm remote`，确认扩展重新识别了正确题目。
+
+### 清理站点目录：`acm clean`
+
+```powershell
+acm clean luogu
+acm clean nowcoder
+acm clean leetcode
+acm clean ybt
+acm clean "*"
+```
+
+> `clean` 会立即永久删除配置中对应的整个站点目录及其题目文件。执行前请确认已提交到 Git 或已经备份。
+
+只允许传入完整站点名或 `*`。以下内部路径会被拒绝：
+
+```powershell
+acm clean luogu/P1001
+```
+
+在 Bash 中必须给 `*` 加引号，避免被 shell 展开。工作空间中的其他文件不会被删除。
+
+## 重要注意事项
+
+1. **操作目标以 `acm remote` 为准。** VS Code 当前显示的文件不一定等于浏览器当前活动题目。
+2. **保存不等于提交。** 只有明确运行 `acm push` 才会点击提交按钮。
+3. **`refresh` 会覆盖代码。** 它会同时修改网页和本地文件。
+4. **`clean` 会永久删除整个站点目录。** 命令没有逐题清理功能。
+5. **不要同时启用多个 Algo Sync 工作空间。** 默认只应有一个工作空间监听端口。
+6. **浏览器扩展更新后要重新加载。** 重新构建但不在扩展管理页点击“重新加载”时，浏览器仍运行旧代码。
+7. **VS Code 扩展更新后要重装 VSIX 并重新加载窗口。**
+8. **切换题目或语言后等待页面加载完成。** 随后使用 `acm remote` 再次确认。
+9.  **关闭工作空间后同步会休眠。** 浏览器扩展不会继续读取、创建或覆盖本地文件。
 
 ## 文件和配置
 
-`.algo-sync.json` 的默认内容：
+默认 `.algo-sync.json`：
 
 ```json
 {
@@ -92,35 +361,33 @@ CLI 会读取 VS Code 中当前题目代码（包括尚未落盘但仍在编辑�
 }
 ```
 
-- `solutionRoot` 和各站点目录必须是工作区内的相对路径；绝对路径和 `..` 会退回安全默认值。
-- `statementPreview` 为 `true` 时自动打开 VS Code 原生 Markdown 预览；设为 `false` 后仍会生成和更新 `题目.md`，并可用命令手动预览。
-- 端口允许设置为 `27121` 至 `27130`。浏览器扩展会在这个范围内发现唯一活动工作空间。
-- 目录名和文件名中的 Windows 非法字符会替换为 `-`。查找已有目录时以站点和题号为准，因此题名变化不会重复创建；同一题的七种语言文件共用一个目录。
+- `enabled`：是否启用当前工作空间。
+- `port`：本地连接端口，只允许 `27121` 至 `27130`。
+- `solutionRoot`：题目目录根路径，必须是工作空间内的相对路径。
+- `defaultLanguage`：首次打开题目时使用的默认语言。
+- `statementPreview`：是否自动打开题面预览。
+- `siteDirectories`：各网站对应的本地目录。
 
-## 状态与排错
+绝对路径、包含 `..` 的路径和工作空间外路径会退回安全默认值。目录名和文件名中的 Windows 非法字符会替换为 `-`。
 
-- 浏览器徽标 `--`：没有打开启用同步的工作空间，或 VS Code 扩展尚未安装。
-- 浏览器徽标 `ON`：已连接。
-- 浏览器徽标 `!`：协议或同步错误，可点击 VS Code 状态栏或运行 `Algo Sync: Show Status` 查看原因。
-- 若端口已被另一个工作空间占用，VS Code 会明确报错；首版只允许一个活动同步工作空间。
-- 网站升级可能改变编辑器 DOM。适配器找不到编辑器时不会创建或覆盖文件，可在仓库提交对应站点和题目 URL 的 issue。
-- 普通保存只更新网页编辑器，不会提交；只有用户明确运行 `acm push` 才会点击提交。示例仅作为 `题目.md` 的一部分显示，不会写入测试文件。
+## 状态与故障排查
 
-## 安全与隐私
+### 浏览器扩展徽标
 
-- VS Code 服务仅监听 `127.0.0.1`，不接受局域网或公网连接。
-- 服务只接受固定浏览器扩展 ID 或本机 `acm` CLI 的专用 Origin，并校验协议版本、站点、语言、URL、活动文件和消息长度。
-- 浏览器扩展只申请上述四类评测站权限，没有 `<all_urls>` 权限。
-- 代码和转换后的当前题面仅在本机浏览器与 VS Code 之间传输，没有云端服务。
-- HTML 题面转换为 Markdown 时会丢弃脚本、表单和嵌入页面，只保留安全的 HTTP(S) 链接和图片；预览由 VS Code 内置 Markdown 预览器提供。
+- `ON`：已经连接当前 VS Code 工作空间；
+- `--`：没有连接，通常是工作空间未打开、VS Code 扩展未启动或端口不一致；
+- `!`：发生协议或同步错误。
 
-## 开发与验证
 
-```powershell
-npx.cmd tsc --noEmit
-npm.cmd test
-npm.cmd run build
-npm.cmd run package:vscode
-```
 
-修改浏览器端后，在 Chrome/Edge 扩展管理页点击“重新加载”。修改 VS Code 端后，重新生成并安装 VSIX。
+### 页面打开但本地文件没有生成
+
+- 等待题目和编辑器加载完成；
+- 确认浏览器扩展徽标为 `ON`；
+- 运行 `edge refresh`；
+- 再运行 `acm remote`；
+- 洛谷确认 URL 已进入 `#ide`，牛客和力扣确认代码编辑器已经显示。
+
+## 不足
+- 该项目仍有一些bug由于一些原因无法修复，比如对于牛客网上特殊符号的识别仍然可能不准确，导致本地md文件出现看不懂的情况。
+- 如发现其他问题或有建议请联系`guichen2830532983@gmail.com`。

@@ -1,5 +1,11 @@
 import path from "node:path";
-import { LANGUAGE_EXTENSIONS, type Language, type ProblemContext, type Site } from "@algo-sync/shared";
+import {
+  LANGUAGE_EXTENSIONS,
+  type Language,
+  type ProblemContext,
+  type RemoteProblemSummary,
+  type Site
+} from "@algo-sync/shared";
 
 export interface WorkspaceConfig {
   enabled: boolean;
@@ -16,6 +22,14 @@ export const DEFAULT_SITE_DIRECTORIES: Record<Site, string> = {
   leetcode: "leetcode",
   ybt: "ybt"
 };
+
+export function formatRemoteProblems(problems: RemoteProblemSummary[], browser: string): string {
+  const lines = problems.map((problem) => [
+    `${problem.active ? "*" : "-"} ${problem.site}/${problem.problemId}/${problem.language} · ${problem.title}`,
+    `  ${problem.url}`
+  ].join("\n"));
+  return `${browser} 远程题目（${problems.length}）：\n${lines.join("\n")}`;
+}
 
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 
@@ -49,6 +63,35 @@ export function problemDirectoryName(problemId: string, title: string): string {
 export const STATEMENT_FILENAME = "题目.md";
 export const GENERATED_START = "<!-- algo-sync:generated:start -->";
 export const GENERATED_END = "<!-- algo-sync:generated:end -->";
+
+export function isStatementPreviewTab(viewType: string, label: string): boolean {
+  const normalizedLabel = label.replace(/\s+/g, " ").trim();
+  return /markdown.*preview/i.test(viewType) && normalizedLabel.includes(STATEMENT_FILENAME);
+}
+
+export function resolveInitialTemplate(
+  browserTemplate: string | undefined,
+  site: Site
+): string | undefined {
+  if (browserTemplate !== undefined) return browserTemplate;
+  if (site === "luogu" || site === "ybt") return "";
+  // Never infer a pristine template from the current editor buffer: judges
+  // may restore the user's last submission or locally cached work. Old cache
+  // files are deliberately not a fallback because earlier versions may have
+  // created them from exactly such a restored editor buffer.
+  return undefined;
+}
+
+export function shouldDispatchLanguageSwitch(
+  site: Site,
+  current: Language,
+  requested: Language
+): boolean {
+  // `python` is the local file-language family, while Nowcoder exposes both
+  // Python2 and Python3. Reconfirm it on the page so a prior Python2 selection
+  // can still be corrected to Python3.
+  return current !== requested || (site === "nowcoder" && requested === "python");
+}
 
 export function generatedStatementBlock(context: ProblemContext): string {
   const title = `${context.problemId} · ${context.title}`.replace(/[\r\n]+/g, " ").trim();

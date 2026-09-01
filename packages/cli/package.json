@@ -1,12 +1,14 @@
 {
   "name": "@algo-sync/cli",
-  "version": "0.4.0",
+  "version": "0.6.20",
   "private": true,
   "description": "Command-line submission client for Algo Sync Workspace.",
   "license": "MIT",
   "type": "commonjs",
   "bin": {
-    "acm": "dist/acm.cjs"
+    "acm": "dist/acm.cjs",
+    "edge": "dist/edge.cjs",
+    "chrome": "dist/chrome.cjs"
   },
   "files": [
     "dist"
@@ -16,7 +18,7 @@
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@algo-sync/shared": "0.4.0",
+    "@algo-sync/shared": "0.6.20",
     "ws": "^8.18.0"
   },
   "devDependencies": {

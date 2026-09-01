@@ -12,18 +12,24 @@ const outdir = path.join(packageRoot, "dist");
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
 
-const bundle = await rollup({
-  input: path.join(packageRoot, "src/cli.ts"),
-  external: (id) => id.startsWith("node:"),
-  plugins: [typescriptPlugin(), nodeResolve({ preferBuiltins: true, extensions: [".ts", ".js", ".json"] }), commonjs()]
-});
-await bundle.write({
-  file: path.join(outdir, "acm.cjs"),
-  format: "cjs",
-  banner: "#!/usr/bin/env node",
-  exports: "none"
-});
-await bundle.close();
+await build("src/cli.ts", "acm.cjs");
+await build("src/browser-cli.ts", "edge.cjs");
+await build("src/browser-cli.ts", "chrome.cjs");
+
+async function build(input, output) {
+  const bundle = await rollup({
+    input: path.join(packageRoot, input),
+    external: (id) => id.startsWith("node:"),
+    plugins: [typescriptPlugin(), nodeResolve({ preferBuiltins: true, extensions: [".ts", ".js", ".json"] }), commonjs()]
+  });
+  await bundle.write({
+    file: path.join(outdir, output),
+    format: "cjs",
+    banner: "#!/usr/bin/env node",
+    exports: "none"
+  });
+  await bundle.close();
+}
 
 function typescriptPlugin() {
   return {
