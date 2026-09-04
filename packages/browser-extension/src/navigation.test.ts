@@ -9,10 +9,22 @@ import {
   markFetchTabUrl,
   problemCodeMatchesContext,
   problemDestination,
-  resolveProblemUrl
+  resolveProblemUrl,
+  selectMatchingTabId
 } from "./navigation";
 
 describe("problem navigation", () => {
+  it("reselects a matching manually-opened tab when the remembered tab is stale", () => {
+    const candidates = [
+      { tabId: 10, fingerprint: "luogu:P1001:cpp" },
+      { tabId: 11, fingerprint: "luogu:P1098:cpp" },
+      { tabId: 12, fingerprint: "luogu:P1098:cpp" }
+    ];
+    expect(selectMatchingTabId(candidates, "luogu:P1098:cpp", 99, 12)).toBe(12);
+    expect(selectMatchingTabId(candidates, "luogu:P1098:cpp", 11, 12)).toBe(11);
+    expect(selectMatchingTabId(candidates, "luogu:P9999:cpp", 99, 12)).toBeUndefined();
+  });
+
   it.each([
     ["P1001", "https://www.luogu.com.cn/problem/P1001#ide"],
     ["B2001", "https://www.luogu.com.cn/problem/B2001#ide"],

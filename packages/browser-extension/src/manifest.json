@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Algo Sync Workspace",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Synchronize the active online judge editor with an enabled VS Code workspace.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyAUPOFcuGeDZh+tjGEvTRS7xAz/45j+YrV6+EimnM29c66FOK0xjVkcDXZP/+2sEDH2/Faa5XcT6kzYPS8l7lyW1C8qzi7pWX70r3mr9WQYgEWZ2vuUtpoTFW4l7BlJ9//oF4LcqUJJQTsaVgXnIKUYCw3SMwxsDJuzskgRyhuSxbuTC2jV7Xt5FbYJGLe1bk1OUbfDWVLcqB6KlueYxG1IIHUIdmtAFZPFPWVCzvhHcMuJ92cIypKAkLJNwtlwgLSpdYrGvJbPU308X1mzwpBrCzIe6b6J/BysWoZ+GavO/QQyy9afRfOSLyUFnYcOhNKfO35x0/+pb2rfusgAMiQIDAQAB",
   "permissions": [

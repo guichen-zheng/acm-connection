@@ -20,7 +20,8 @@ import {
   luoguRecordId,
   markFetchTabUrl,
   problemCodeMatchesContext,
-  resolveProblemUrl
+  resolveProblemUrl,
+  selectMatchingTabId
 } from "./navigation";
 
 interface TabState {
@@ -32,6 +33,7 @@ interface TabState {
 interface PendingBrowserSubmission {
   requestId: string;
   site: Site;
+  reportTabId: number;
 }
 
 interface RetainedLuoguTarget {
@@ -110,7 +112,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       type: "submissionUpdate",
       protocolVersion: PROTOCOL_VERSION,
       requestId: message.requestId,
-      tabId: sender.tab.id,
+      tabId: pending.reportTabId,
       phase: message.phase,
       status: message.status,
       success: message.success,
@@ -136,7 +138,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   announceActiveContext();
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === "loading") tabs.delete(tabId);
+  if (changeInfo.status === "loading" || changeInfo.url) tabs.delete(tabId);
   const updatedUrl = changeInfo.url ?? tab.url;
   if (changeInfo.url && !luoguRecordId(changeInfo.url)) clearLuoguRecord(tabId);
   if (luoguRecordId(updatedUrl) && pendingSubmissions.get(tabId)?.site === "luogu") {
@@ -173,7 +175,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       type: "submissionUpdate",
       protocolVersion: PROTOCOL_VERSION,
       requestId: pending.requestId,
-      tabId,
+      tabId: pending.reportTabId,
       phase: "error",
       status: "评测完成前浏览器标签页已关闭",
       success: false
@@ -293,7 +295,21 @@ function handleWorkspaceMessage(raw: unknown): void {
 }
 
 async function beginSubmission(message: SubmitCodeMessage): Promise<void> {
-  const previous = pendingSubmissions.get(message.tabId);
+  const resolved = await resolveSubmissionTarget(message);
+  if (typeof resolved === "string") {
+    sendSocket({
+      type: "submissionUpdate",
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: message.requestId,
+      tabId: message.tabId,
+      phase: "error",
+      status: resolved,
+      success: false
+    });
+    return;
+  }
+  const submission = resolved;
+  const previous = pendingSubmissions.get(submission.tabId);
   if (previous && previous.requestId !== message.requestId) {
     sendSocket({
       type: "submissionUpdate",
@@ -306,35 +322,8 @@ async function beginSubmission(message: SubmitCodeMessage): Promise<void> {
     });
     return;
   }
-  const luoguRecovery = message.site === "luogu"
-    ? await restoreLuoguIdeFromRecord(message)
-    : "not-record";
-  if (luoguRecovery === "failed") {
-    sendSocket({
-      type: "submissionUpdate",
-      protocolVersion: PROTOCOL_VERSION,
-      requestId: message.requestId,
-      tabId: message.tabId,
-      phase: "error",
-      status: "已保留该洛谷题目的连接，但自动返回题目 IDE 失败；请确认页面已加载后重试",
-      success: false
-    });
-    return;
-  }
-  if (luoguRecovery !== "restored" && !await ensureMatchingContext(message)) {
-    sendSocket({
-      type: "submissionUpdate",
-      protocolVersion: PROTOCOL_VERSION,
-      requestId: message.requestId,
-      tabId: message.tabId,
-      phase: "error",
-      status: "活动网页题目或语言已经改变",
-      success: false
-    });
-    return;
-  }
-  if (message.site === "nowcoder") {
-    if (!await reloadNowcoderBeforeSubmission(message)) {
+  if (submission.site === "nowcoder") {
+    if (!await reloadNowcoderBeforeSubmission(submission)) {
       sendSocket({
         type: "submissionUpdate",
         protocolVersion: PROTOCOL_VERSION,
@@ -346,7 +335,7 @@ async function beginSubmission(message: SubmitCodeMessage): Promise<void> {
       });
       return;
     }
-    const dialog = await dismissNowcoderAcceptedDialog(message.tabId);
+    const dialog = await dismissNowcoderAcceptedDialog(submission.tabId);
     if (dialog === "blocked") {
       sendSocket({
         type: "submissionUpdate",
@@ -360,13 +349,17 @@ async function beginSubmission(message: SubmitCodeMessage): Promise<void> {
       return;
     }
   }
-  pendingSubmissions.set(message.tabId, { requestId: message.requestId, site: message.site });
+  pendingSubmissions.set(submission.tabId, {
+    requestId: message.requestId,
+    site: submission.site,
+    reportTabId: message.tabId
+  });
   try {
-    if (message.site === "nowcoder") await setNowcoderAcceptedDialogWatcher(message.tabId, true);
-    await chrome.tabs.sendMessage(message.tabId, { ...message, type: "submitCode" });
+    if (submission.site === "nowcoder") await setNowcoderAcceptedDialogWatcher(submission.tabId, true);
+    await chrome.tabs.sendMessage(submission.tabId, { ...submission, type: "submitCode" });
   } catch (error) {
-    pendingSubmissions.delete(message.tabId);
-    if (message.site === "nowcoder") void setNowcoderAcceptedDialogWatcher(message.tabId, false);
+    pendingSubmissions.delete(submission.tabId);
+    if (submission.site === "nowcoder") void setNowcoderAcceptedDialogWatcher(submission.tabId, false);
     sendSocket({
       type: "submissionUpdate",
       protocolVersion: PROTOCOL_VERSION,
@@ -377,6 +370,79 @@ async function beginSubmission(message: SubmitCodeMessage): Promise<void> {
       success: false
     });
   }
+}
+
+async function resolveSubmissionTarget(message: SubmitCodeMessage): Promise<SubmitCodeMessage | string> {
+  const directRecovery = message.site === "luogu"
+    ? await restoreLuoguIdeFromRecord(message)
+    : "not-record";
+  if (directRecovery === "failed") {
+    return "已保留该洛谷题目的连接，但自动返回题目 IDE 失败；请确认页面已加载后重试";
+  }
+  if (directRecovery === "restored") return message;
+  if (message.site === "luogu") {
+    const ide = await ensureLuoguIdeMode(message);
+    if (ide.ok && await ensureMatchingContext(message)) return message;
+  } else if (await ensureMatchingContext(message)) {
+    return message;
+  }
+
+  const matchedTabId = await findMatchingSubmissionTab(message);
+  if (matchedTabId === undefined) return "当前浏览器中没有匹配的网站、题号和语言";
+  const resolved = { ...message, tabId: matchedTabId };
+  lastSentFingerprint = "";
+  void announceTabContext(matchedTabId);
+  return resolved;
+}
+
+async function findMatchingSubmissionTab(
+  message: Pick<SubmitCodeMessage, "tabId" | "site" | "problemId" | "language">
+): Promise<number | undefined> {
+  const expected = problemKey(message);
+  const selectDetected = (): number | undefined => selectMatchingTabId(
+    Array.from(tabs, ([tabId, state]) => ({ tabId, fingerprint: state.fingerprint })),
+    expected,
+    message.tabId,
+    activeTabId
+  );
+
+  let matched = selectDetected();
+  if (matched !== undefined && await ensureMatchingContext({ ...message, tabId: matched })) return matched;
+
+  const candidates = (await chrome.tabs.query({ url: [
+    "https://www.luogu.com.cn/problem/*",
+    "https://ac.nowcoder.com/acm/problem/*",
+    "https://www.nowcoder.com/practice/*",
+    "https://leetcode.cn/problems/*",
+    "http://ybt.ssoier.cn:8088/*",
+    "https://ybt.ssoier.cn/*"
+  ] })).filter((tab) => tab.id !== undefined && isPotentialProblemUrl(tab.url));
+  await Promise.all(candidates.map((tab) => requestTabContext(tab.id!, true)));
+  const detectionDeadline = Date.now() + 2_000;
+  while (Date.now() < detectionDeadline) {
+    matched = selectDetected();
+    if (matched !== undefined && await ensureMatchingContext({ ...message, tabId: matched })) return matched;
+    await delay(100);
+  }
+
+  if (message.site !== "luogu") return undefined;
+  const luoguTabs = candidates
+    .filter((tab) => luoguIdeUrlForProblem(tab.url, message.problemId) !== undefined)
+    .sort((left, right) => Number(right.id === message.tabId) - Number(left.id === message.tabId) ||
+      Number(right.id === activeTabId) - Number(left.id === activeTabId));
+  for (const tab of luoguTabs) {
+    const tabId = tab.id!;
+    const ide = await ensureLuoguIdeMode({ tabId, problemId: message.problemId });
+    if (ide.ok && await ensureMatchingContext({ ...message, tabId })) return tabId;
+  }
+
+  const recordTabs = await chrome.tabs.query({ url: "https://www.luogu.com.cn/record/*" });
+  for (const tab of recordTabs.filter((candidate) => candidate.id !== undefined && candidate.id !== message.tabId)) {
+    const tabId = tab.id!;
+    const recovery = await restoreLuoguIdeFromRecord({ ...message, tabId });
+    if (recovery === "restored") return tabId;
+  }
+  return undefined;
 }
 
 async function restoreLuoguIdeFromRecord(
@@ -562,12 +628,13 @@ async function ensureLuoguIdeMode(
   }
   const ideUrl = luoguIdeUrlForProblem(tab.url, message.problemId);
   if (!ideUrl) return { ok: false, changed: false };
-  const changed = tab.url !== ideUrl;
+  const changed = tab.url !== ideUrl || tab.discarded === true;
   if (changed) {
     tabs.delete(message.tabId);
     if (activeTabId === message.tabId) lastSentFingerprint = "";
     try {
-      await chrome.tabs.update(message.tabId, { url: ideUrl });
+      if (tab.url !== ideUrl) await chrome.tabs.update(message.tabId, { url: ideUrl });
+      else await chrome.tabs.reload(message.tabId);
     } catch {
       return { ok: false, changed };
     }

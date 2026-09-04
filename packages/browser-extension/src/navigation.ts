@@ -6,7 +6,26 @@ export interface ProblemDestination {
   needsLeetCodeLookup: boolean;
 }
 
+export interface TabFingerprint {
+  tabId: number;
+  fingerprint: string;
+}
+
 export const FETCH_TAB_MARKER = "algo_sync_fetch";
+
+export function selectMatchingTabId(
+  candidates: readonly TabFingerprint[],
+  expectedFingerprint: string,
+  requestedTabId: number,
+  activeTabId?: number
+): number | undefined {
+  const matches = candidates
+    .filter((candidate) => candidate.fingerprint === expectedFingerprint)
+    .map((candidate) => candidate.tabId);
+  if (matches.includes(requestedTabId)) return requestedTabId;
+  if (activeTabId !== undefined && matches.includes(activeTabId)) return activeTabId;
+  return matches[0];
+}
 
 export function markFetchTabUrl(rawUrl: string): string {
   const url = new URL(rawUrl);

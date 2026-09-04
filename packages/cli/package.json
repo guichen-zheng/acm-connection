@@ -1,6 +1,6 @@
 {
   "name": "@algo-sync/cli",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Command-line submission client for Algo Sync Workspace.",
   "license": "MIT",
@@ -18,7 +18,7 @@
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@algo-sync/shared": "1.0.0",
+    "@algo-sync/shared": "1.0.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {

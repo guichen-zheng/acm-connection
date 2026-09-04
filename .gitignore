@@ -3,6 +3,11 @@ packages/*/dist/
 dist/
 coverage/
 .algo-sync-cache/
+/luogu/
+/nowcoder/
+/leetcode/
+/ybt/
+/-files luogu nowcoder leetcode ybt
 *.vsix
 *.log
 .DS_Store
