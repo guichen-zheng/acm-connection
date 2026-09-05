@@ -255,6 +255,128 @@ export function readSubmissionStatus(site: Site, doc = document): SubmissionStat
 }
 
 /**
+ * Luogu renders a failed point's checker message in a hover tooltip. Give the
+ * page a chance to create that tooltip before the terminal result is sent to
+ * the CLI, while retaining attribute-based details that are already in the DOM.
+ */
+export async function enrichLuoguTestPointDetails(
+  testPoints: TestPointResult[],
+  doc = document,
+  pageUrl = doc.defaultView?.location.href ?? "",
+  request: typeof fetch = fetch
+): Promise<TestPointResult[]> {
+  if (!testPoints.some((point) => point.verdict !== "AC" && !point.detail)) return testPoints;
+  const enriched = testPoints.map((point) => ({ ...point }));
+  try {
+    const recordDetails = await fetchLuoguRecordTestPointDetails(pageUrl, request);
+    for (const point of enriched) {
+      if (point.verdict === "AC" || point.detail) continue;
+      const candidate = recordDetails.get(point.id);
+      if (candidate && isLuoguDetailCompatibleWithVerdict(candidate, point.verdict)) point.detail = candidate;
+    }
+  } catch {
+    // The visible record page still provides a DOM/tooltip fallback below.
+  }
+  if (!enriched.some((point) => point.verdict !== "AC" && !point.detail)) return enriched;
+  const entries = findLuoguVerdictElements(doc).map((verdictElement, index) => ({
+    verdictElement,
+    point: parseLuoguTestPoint(verdictElement, index + 1)
+  }));
+  for (const point of enriched) {
+    if (point.verdict === "AC" || point.detail) continue;
+    const entry = entries.find((candidate) => candidate.point.id === point.id &&
+      candidate.point.verdict === point.verdict);
+    if (!entry) continue;
+    if (entry.point.detail) {
+      point.detail = entry.point.detail;
+      continue;
+    }
+    const card = findLuoguTestPointCard(entry.verdictElement);
+    dispatchLuoguHover(card.element, entry.verdictElement, true);
+    try {
+      await waitForLuoguTooltip(250);
+      point.detail = readLuoguTestPointDetail(
+        entry.verdictElement,
+        card.element,
+        card.text,
+        true
+      );
+    } finally {
+      dispatchLuoguHover(card.element, entry.verdictElement, false);
+    }
+  }
+  return enriched;
+}
+
+export async function fetchLuoguRecordTestPointDetails(
+  pageUrl: string,
+  request: typeof fetch = fetch
+): Promise<Map<string, string>> {
+  const parsedUrl = new URL(pageUrl);
+  const recordId = parsedUrl.pathname.match(/^\/record\/(\d+)/)?.[1];
+  if (!recordId || parsedUrl.hostname !== "www.luogu.com.cn") return new Map();
+  const apiUrl = new URL(`/record/${recordId}`, parsedUrl.origin);
+  apiUrl.searchParams.set("_contentOnly", "1");
+  apiUrl.searchParams.set("_t", String(Date.now()));
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3_000);
+  try {
+    const response = await request(apiUrl.toString(), {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: controller.signal
+    });
+    if (!response.ok) return new Map();
+    return parseLuoguRecordTestPointDetails(await response.json(), recordId);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function parseLuoguRecordTestPointDetails(payload: unknown, expectedRecordId: string): Map<string, string> {
+  const envelope = objectValue(payload);
+  const data = objectValue(envelope?.currentData ?? envelope?.data ?? payload);
+  const record = objectValue(data?.record ?? data);
+  if (!record || String(record.id ?? "") !== expectedRecordId) return new Map();
+  const detail = objectValue(record.detail);
+  const judgeResult = objectValue(detail?.judgeResult);
+  const result = new Map<string, string>();
+  let ordinal = 0;
+  for (const subtask of collectionValues(judgeResult?.subtasks)) {
+    const subtaskRecord = objectValue(subtask);
+    for (const testCase of collectionValues(subtaskRecord?.testCases ?? subtaskRecord?.cases)) {
+      ordinal += 1;
+      const testCaseRecord = objectValue(testCase);
+      if (!testCaseRecord || typeof testCaseRecord.description !== "string") continue;
+      const description = normalize(testCaseRecord.description).replace(/\s*:\s*/g, ": ");
+      // Luogu's record payload uses zero-based case IDs, while the record page
+      // labels its cards #1, #2, ... . The visible order is the stable join key.
+      if (description && description.length <= 2_000) result.set(String(ordinal), description);
+    }
+  }
+  return result;
+}
+
+function collectionValues(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  const record = objectValue(value);
+  return record ? Object.values(record) : [];
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function isLuoguDetailCompatibleWithVerdict(detail: string, verdict: string): boolean {
+  if (verdict === "AC") return true;
+  return !/^(?:ok\b.*accepted|accepted\b|答案正确|评测通过)/i.test(detail.trim());
+}
+
+/**
  * Records a result-region mutation even when the old and new verdict text are
  * identical (for example AC followed by another AC). Polling text alone cannot
  * distinguish that very common LeetCode sequence.
@@ -591,18 +713,25 @@ export function classifySubmissionStatus(value: string): SubmissionStatus | unde
 }
 
 function readLuoguTestPoints(doc: Document): SubmissionStatus | undefined {
-  const verdictElements = Array.from(doc.querySelectorAll<HTMLElement>("body *"))
-    .filter((element) => !Array.from(element.children).some((child) =>
-      /^(?:AC|WA|CE|RE|TLE|MLE|OLE|UKE|PC)$/.test(normalize(child.textContent ?? "").toUpperCase())))
-    .filter((element) => /^(?:AC|WA|CE|RE|TLE|MLE|OLE|UKE|PC)$/.test(
-      normalize(element.textContent ?? "").toUpperCase()
-    ));
+  const verdictElements = findLuoguVerdictElements(doc);
   if (verdictElements.length === 0) return undefined;
   const parsedPoints = verdictElements.map((element, index) => parseLuoguTestPoint(element, index + 1));
   const byId = new Map<string, TestPointResult>();
   for (const point of parsedPoints) {
     const existing = byId.get(point.id);
-    if (!existing || point.time || point.memory) byId.set(point.id, point);
+    if (!existing) {
+      byId.set(point.id, point);
+      continue;
+    }
+    if (point.time || point.memory || point.detail) {
+      byId.set(point.id, {
+        ...existing,
+        ...point,
+        time: point.time ?? existing.time,
+        memory: point.memory ?? existing.memory,
+        detail: point.detail ?? existing.detail
+      });
+    }
   }
   const testPoints = Array.from(byId.values()).sort((left, right) =>
     left.id.localeCompare(right.id, undefined, { numeric: true }));
@@ -626,21 +755,131 @@ function readLuoguTestPoints(doc: Document): SubmissionStatus | undefined {
   };
 }
 
+function findLuoguVerdictElements(doc: Document): HTMLElement[] {
+  return Array.from(doc.querySelectorAll<HTMLElement>("body *"))
+    .filter((element) => !Array.from(element.children).some((child) =>
+      /^(?:AC|WA|CE|RE|TLE|MLE|OLE|UKE|PC)$/.test(normalize(child.textContent ?? "").toUpperCase())))
+    .filter((element) => /^(?:AC|WA|CE|RE|TLE|MLE|OLE|UKE|PC)$/.test(
+      normalize(element.textContent ?? "").toUpperCase()
+    ));
+}
+
 function parseLuoguTestPoint(verdictElement: HTMLElement, fallbackId: number): TestPointResult {
   const verdict = normalize(verdictElement.textContent ?? "").toUpperCase();
+  const card = findLuoguTestPointCard(verdictElement);
+  const id = card.text.match(/#\s*(\d+)/)?.[1] ?? String(fallbackId);
+  const time = card.text.match(/(\d+(?:\.\d+)?\s*ms)/i)?.[1]?.replace(/\s+/g, "");
+  const memory = card.text.match(/(\d+(?:\.\d+)?\s*(?:KB|MB|GB))/i)?.[1]?.replace(/\s+/g, "");
+  const detail = verdict === "AC"
+    ? undefined
+    : readLuoguTestPointDetail(verdictElement, card.element, card.text, false);
+  return { id, verdict, time, memory, detail };
+}
+
+function findLuoguTestPointCard(verdictElement: HTMLElement): { element: HTMLElement; text: string } {
   let current: HTMLElement | null = verdictElement;
-  let cardText = "";
   for (let depth = 0; current && depth < 7; depth++, current = current.parentElement) {
     const text = normalize(current.textContent ?? "");
     if (/#\s*\d+/.test(text) && /\d+(?:\.\d+)?\s*ms/i.test(text) && /\d+(?:\.\d+)?\s*(?:KB|MB|GB)/i.test(text)) {
-      cardText = text;
-      break;
+      return { element: current, text };
     }
   }
-  const id = cardText.match(/#\s*(\d+)/)?.[1] ?? String(fallbackId);
-  const time = cardText.match(/(\d+(?:\.\d+)?\s*ms)/i)?.[1]?.replace(/\s+/g, "");
-  const memory = cardText.match(/(\d+(?:\.\d+)?\s*(?:KB|MB|GB))/i)?.[1]?.replace(/\s+/g, "");
-  return { id, verdict, time, memory };
+  return { element: verdictElement, text: normalize(verdictElement.textContent ?? "") };
+}
+
+function readLuoguTestPointDetail(
+  verdictElement: HTMLElement,
+  cardElement: HTMLElement,
+  cardText: string,
+  includeActiveTooltips: boolean
+): string | undefined {
+  const candidates: string[] = [];
+  const scope = new Set<HTMLElement>([verdictElement, cardElement]);
+  for (let current: HTMLElement | null = verdictElement; current; current = current.parentElement) {
+    scope.add(current);
+    if (current === cardElement) break;
+  }
+  for (const element of Array.from(cardElement.querySelectorAll<HTMLElement>("*"))) scope.add(element);
+  for (const element of scope) {
+    for (const attribute of [
+      "title",
+      "aria-label",
+      "data-title",
+      "data-tooltip",
+      "data-tooltip-content",
+      "data-content",
+      "data-message",
+      "data-error",
+      "data-tip"
+    ]) {
+      const value = element.getAttribute(attribute);
+      if (value) candidates.push(value);
+    }
+    for (const id of (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)) {
+      const described = element.ownerDocument.getElementById(id);
+      if (described?.textContent) candidates.push(described.textContent);
+    }
+  }
+  if (includeActiveTooltips) {
+    for (const element of Array.from(cardElement.ownerDocument.querySelectorAll<HTMLElement>(
+      "[role='tooltip'],[class*='tooltip'],[class*='popper'],[class*='popover'],[data-popper-placement],[data-state='open']"
+    ))) {
+      if (isDisplayedTooltip(element) && element.textContent) candidates.push(element.textContent);
+    }
+  }
+  return chooseLuoguDetail(candidates, normalize(verdictElement.textContent ?? "").toUpperCase(), cardText);
+}
+
+function chooseLuoguDetail(candidates: string[], verdict: string, cardText: string): string | undefined {
+  const expandedVerdict = expandLuoguVerdict(verdict).toLowerCase();
+  const normalizedCard = normalize(cardText).toLowerCase();
+  const unique = Array.from(new Set(candidates.map((candidate) => normalize(candidate)
+    .replace(/\s*:\s*/g, ": "))))
+    .filter((candidate) => {
+      if (!candidate || candidate.length > 2_000) return false;
+      const lower = candidate.toLowerCase();
+      if (lower === verdict.toLowerCase() || lower === expandedVerdict || lower === normalizedCard) return false;
+      if (/^#?\d+\s*(?:AC|WA|CE|RE|TLE|MLE|OLE|UKE|PC)?(?:\s+\d+(?:\.\d+)?\s*ms)?/i.test(candidate) &&
+        !/(?:wrong|error|too\s+(?:long|short)|limit|expected|found|checker|line\s*\d|错误|超时|超限|异常|不匹配)/i.test(candidate)) {
+        return false;
+      }
+      return /(?:wrong|error|too\s+(?:long|short)|limit|expected|found|checker|line\s*\d|runtime|signal|exit|错误|超时|超限|异常|不匹配|答案)/i.test(candidate);
+    });
+  return unique.sort((left, right) => right.length - left.length)[0];
+}
+
+function isDisplayedTooltip(element: HTMLElement): boolean {
+  if (element.getAttribute("aria-hidden") === "true" || element.hidden) return false;
+  const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+  return style?.display !== "none" && style?.visibility !== "hidden" && style?.opacity !== "0";
+}
+
+function dispatchLuoguHover(card: HTMLElement, verdict: HTMLElement, enter: boolean): void {
+  const view = card.ownerDocument.defaultView;
+  const MouseEventConstructor = view?.MouseEvent;
+  if (!MouseEventConstructor) return;
+  const targets = Array.from(new Set([card, verdict]));
+  for (const target of targets) {
+    const PointerEventConstructor = view?.PointerEvent;
+    const pointerEvents = enter
+      ? [["pointerover", true], ["pointerenter", false]] as const
+      : [["pointerout", true], ["pointerleave", false]] as const;
+    if (PointerEventConstructor) {
+      for (const [type, bubbles] of pointerEvents) {
+        target.dispatchEvent(new PointerEventConstructor(type, { bubbles, cancelable: true }));
+      }
+    }
+    const mouseEvents = enter
+      ? [["mouseover", true], ["mouseenter", false]] as const
+      : [["mouseout", true], ["mouseleave", false]] as const;
+    for (const [type, bubbles] of mouseEvents) {
+      target.dispatchEvent(new MouseEventConstructor(type, { bubbles, cancelable: true }));
+    }
+  }
+}
+
+function waitForLuoguTooltip(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function expandLuoguVerdict(verdict: string): string {

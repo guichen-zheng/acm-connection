@@ -84,6 +84,7 @@ export interface TestPointResult {
   verdict: string;
   time?: string;
   memory?: string;
+  detail?: string;
 }
 
 export interface SubmitCodeMessage {
@@ -389,7 +390,8 @@ function isTestPointResults(value: unknown): value is TestPointResult[] {
   return Array.isArray(value) && value.length <= 1_000 && value.every((point) => isRecord(point) &&
     isBoundedText(point.id, 32) && isBoundedText(point.verdict, 32) &&
     (point.time === undefined || isBoundedText(point.time, 64)) &&
-    (point.memory === undefined || isBoundedText(point.memory, 64)));
+    (point.memory === undefined || isBoundedText(point.memory, 64)) &&
+    (point.detail === undefined || isBoundedText(point.detail, 2_000)));
 }
 
 function isRemoteProblemSummary(value: unknown): value is RemoteProblemSummary {

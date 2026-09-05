@@ -56,7 +56,8 @@ function formatTestPoint(point: NonNullable<CliUpdateMessage["testPoints"]>[numb
   const metrics = point.time || point.memory
     ? `${point.time ?? "-"}/${point.memory ?? "-"}`
     : "";
-  return `[#${point.id}] ${paint(verdict, verdictColor(verdict), useColor)}${padding}${metrics}`.trimEnd();
+  const detail = point.detail ? ` · ${point.detail.replace(/\s+/g, " ").trim()}` : "";
+  return `[#${point.id}] ${paint(verdict, verdictColor(verdict), useColor)}${padding}${metrics}${detail}`.trimEnd();
 }
 
 function verdictColor(verdict: string): keyof typeof COLORS {

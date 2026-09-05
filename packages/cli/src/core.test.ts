@@ -85,11 +85,18 @@ describe("acm CLI output", () => {
       allAccepted: false,
       testPoints: [
         { id: "1", verdict: "AC", time: "4ms", memory: "788.00KB" },
-        { id: "2", verdict: "WA", time: "4ms", memory: "1.04MB" }
+        {
+          id: "2",
+          verdict: "WA",
+          time: "4ms",
+          memory: "1.04MB",
+          detail: "Wrong Answer: wrong answer Too long on line 1."
+        }
       ]
     });
     expect(output).toContain("[#1] \u001b[32mAC\u001b[0m");
     expect(output).toContain("[#2] \u001b[31mWA\u001b[0m");
+    expect(output).toContain("4ms/1.04MB · Wrong Answer: wrong answer Too long on line 1.");
   });
 
   it("prints a yellow CE followed by compiler diagnostics", () => {

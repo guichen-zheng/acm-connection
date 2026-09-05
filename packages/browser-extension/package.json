@@ -1,6 +1,6 @@
 {
   "name": "@algo-sync/browser-extension",
-  "version": "1.0.1",
+  "version": "1.0.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@algo-sync/shared": "1.0.1"
+    "@algo-sync/shared": "1.0.4"
   },
   "devDependencies": {
     "@types/chrome": "^0.1.0"

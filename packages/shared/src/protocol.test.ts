@@ -136,8 +136,27 @@ describe("protocol", () => {
       status: "Accepted",
       success: true,
       allAccepted: true,
-      testPoints: [{ id: "1", verdict: "AC", time: "4ms", memory: "788KB" }]
+      testPoints: [{
+        id: "1",
+        verdict: "AC",
+        time: "4ms",
+        memory: "788KB",
+        detail: "checker message"
+      }]
     })?.type).toBe("submissionUpdate");
+  });
+
+  it("rejects an oversized test-point detail", () => {
+    expect(parseBrowserMessage({
+      type: "submissionUpdate",
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: "12345678-1234-1234-1234-123456789012",
+      tabId: 7,
+      phase: "finished",
+      status: "Wrong Answer",
+      success: false,
+      testPoints: [{ id: "1", verdict: "WA", detail: "x".repeat(2_001) }]
+    })).toBeUndefined();
   });
 
   it("accepts a captcha attention update", () => {

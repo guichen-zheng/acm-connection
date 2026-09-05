@@ -1,6 +1,6 @@
 {
   "name": "@algo-sync/shared",
-  "version": "1.0.1",
+  "version": "1.0.4",
   "private": true,
   "type": "module",
   "main": "src/protocol.ts",

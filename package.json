@@ -1,6 +1,6 @@
 {
   "name": "algo-sync-workspace",
-  "version": "1.0.1",
+  "version": "1.0.4",
   "private": true,
   "description": "Workspace-scoped synchronization between online judge editors and VS Code.",
   "workspaces": [

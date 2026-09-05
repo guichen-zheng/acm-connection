@@ -23,6 +23,7 @@ import { extractStatementMarkdown } from "./statement";
 import {
   activateSubmissionControl,
   describeSubmitCandidates,
+  enrichLuoguTestPointDetails,
   findConfirmationControl,
   findNowcoderPostSubmissionDismissControl,
   findSubmitControl,
@@ -447,7 +448,7 @@ async function watchSubmission(
         await emitSubmissionUpdate(requestId, "error", feedback.text, false);
         return;
       }
-      const result = readSubmissionStatus(site);
+      let result = readSubmissionStatus(site);
       if (!result) {
         // The old result panel disappearing is itself a transition. This also
         // covers LeetCode's judging phase, which replaces console-result with
@@ -458,6 +459,12 @@ async function watchSubmission(
       const key = `${result.phase}:${result.status}`;
       if (location.href !== initialUrl || key !== baselineKey) sawTransition = true;
       if (result.phase === "judging") sawTransition = true;
+      if (site === "luogu" && result.phase === "finished" && sawTransition && result.testPoints) {
+        result = {
+          ...result,
+          testPoints: await enrichLuoguTestPointDetails(result.testPoints)
+        };
+      }
       if (key !== lastStatus && (sawTransition || result.phase === "judging")) {
         lastStatus = key;
         await emitSubmissionUpdate(

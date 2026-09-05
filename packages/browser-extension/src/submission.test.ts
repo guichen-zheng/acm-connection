@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activateSubmissionControl,
   classifySubmissionStatus,
+  enrichLuoguTestPointDetails,
+  fetchLuoguRecordTestPointDetails,
   findNowcoderPostSubmissionDismissControl,
   findSubmitControl,
   isCaptchaChallengePresent,
@@ -255,6 +257,143 @@ describe("submission adapter", () => {
       phase: "finished",
       success: false
     });
+  });
+
+  it("reads a Luogu test-point diagnostic from its tooltip metadata", () => {
+    document.body.innerHTML = `
+      <div class="test-case" title="Wrong Answer:wrong answer Too long on line 1.">
+        <b>#1</b><span>WA</span><small>4ms / 788KB</small>
+      </div>
+      <div class="test-case"><b>#2</b><span>AC</span><small>4ms / 792KB</small></div>`;
+    expect(readSubmissionStatus("luogu")?.testPoints?.[0]).toEqual({
+      id: "1",
+      verdict: "WA",
+      time: "4ms",
+      memory: "788KB",
+      detail: "Wrong Answer: wrong answer Too long on line 1."
+    });
+  });
+
+  it("hovers a failed Luogu point and reads the dynamically rendered tooltip", async () => {
+    document.body.innerHTML = `
+      <div id="point" class="test-case">
+        <b>#1</b><span>WA</span><small>4ms / 788KB</small>
+      </div>`;
+    document.querySelector<HTMLElement>("#point")?.addEventListener("mouseenter", () => {
+      if (document.querySelector("[role='tooltip']")) return;
+      const tooltip = document.createElement("div");
+      tooltip.setAttribute("role", "tooltip");
+      tooltip.textContent = "Wrong Answer:wrong answer Too long on line 1.";
+      document.body.append(tooltip);
+    });
+    const points = readSubmissionStatus("luogu")?.testPoints ?? [];
+    await expect(enrichLuoguTestPointDetails(points)).resolves.toMatchObject([{
+      id: "1",
+      verdict: "WA",
+      detail: "Wrong Answer: wrong answer Too long on line 1."
+    }]);
+  });
+
+  it("reads failed-point descriptions from Luogu's record data", async () => {
+    const request = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        currentData: {
+          record: {
+            id: 123456,
+            detail: {
+              judgeResult: {
+                subtasks: [{
+                  id: 1,
+                  testCases: {
+                    0: {
+                      id: 0,
+                      status: 6,
+                      time: 4,
+                      memory: 788,
+                      description: "Wrong Answer:wrong answer Too long on line 1."
+                    },
+                    1: { id: 1, status: 12, time: 4, memory: 792, description: "ok accepted" }
+                  }
+                }]
+              }
+            }
+          }
+        }
+      })
+    })) as unknown as typeof fetch;
+    const details = await fetchLuoguRecordTestPointDetails(
+      "https://www.luogu.com.cn/record/123456",
+      request
+    );
+    expect(details.get("1")).toBe("Wrong Answer: wrong answer Too long on line 1.");
+    expect(request).toHaveBeenCalledWith(
+      expect.stringContaining("/record/123456?_contentOnly=1&_t="),
+      expect.objectContaining({ credentials: "include", cache: "no-store" })
+    );
+  });
+
+  it("joins Luogu record descriptions to their terminal test-point lines", async () => {
+    document.body.innerHTML = `
+      <div class="test-case"><b>#1</b><span>WA</span><small>4ms / 788KB</small></div>
+      <div class="test-case"><b>#2</b><span>AC</span><small>4ms / 792KB</small></div>`;
+    const request = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        currentData: {
+          record: {
+            id: 123456,
+            detail: {
+              judgeResult: {
+                subtasks: [{ testCases: [{
+                  id: 0,
+                  description: "Wrong Answer:wrong answer Too long on line 1."
+                }, {
+                  id: 1,
+                  description: "ok accepted"
+                }] }]
+              }
+            }
+          }
+        }
+      })
+    })) as unknown as typeof fetch;
+    const points = readSubmissionStatus("luogu")?.testPoints ?? [];
+    await expect(enrichLuoguTestPointDetails(
+      points,
+      document,
+      "https://www.luogu.com.cn/record/123456",
+      request
+    )).resolves.toMatchObject([
+      { id: "1", verdict: "WA", detail: "Wrong Answer: wrong answer Too long on line 1." },
+      { id: "2", verdict: "AC", detail: undefined }
+    ]);
+  });
+
+  it("never attaches an accepted-case description to a failed Luogu point", async () => {
+    const request = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        currentData: {
+          record: {
+            id: 123456,
+            detail: {
+              judgeResult: {
+                subtasks: [{ testCases: [{ id: 0, status: 12, description: "ok accepted" }] }]
+              }
+            }
+          }
+        }
+      })
+    })) as unknown as typeof fetch;
+    await expect(enrichLuoguTestPointDetails(
+      [{ id: "1", verdict: "WA", time: "4ms", memory: "788KB" }],
+      document,
+      "https://www.luogu.com.cn/record/123456",
+      request
+    )).resolves.toEqual([
+      { id: "1", verdict: "WA", time: "4ms", memory: "788KB", detail: undefined }
+    ]);
   });
 
   it("returns Luogu compiler output as a terminal CE result", () => {
