@@ -56,6 +56,7 @@ let defaultLanguage: Language = "cpp";
 let commandLanguageSwitch: Language | undefined;
 let lastDiagnostic = "";
 const submissionWatchers = new Set<string>();
+const cancelledSubmissions = new Set<string>();
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "requestContext") {
@@ -80,7 +81,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "submitCode") {
     sendResponse({ ok: true });
-    void submitCode(message);
+    cancelledSubmissions.delete(message.requestId);
+    void submitCode(message).finally(() => cancelledSubmissions.delete(message.requestId));
+    return false;
+  }
+  if (message?.type === "cancelSubmission" && typeof message.requestId === "string") {
+    cancelledSubmissions.add(message.requestId);
+    sendResponse({ ok: true });
     return false;
   }
   if (message?.type === "switchLanguage") {
@@ -317,8 +324,10 @@ async function submitCode(message: {
   language: Language;
   code: string;
 }): Promise<void> {
+  if (cancelledSubmissions.has(message.requestId)) return;
   if (message.site === "nowcoder") await dismissNowcoderSuccessDialog();
   const applied = await applyCode(message);
+  if (cancelledSubmissions.has(message.requestId)) return;
   if (!applied.ok) {
     await emitSubmissionUpdate(message.requestId, "error", applied.message ?? "代码写入网页失败", false);
     return;
@@ -344,8 +353,16 @@ async function submitCode(message: {
   const transitionObserver = observeSubmissionTransition(message.site);
   activateSubmissionControl(control);
   await delay(350);
+  if (cancelledSubmissions.has(message.requestId)) {
+    transitionObserver.disconnect();
+    return;
+  }
   findConfirmationControl()?.click();
   await delay(500);
+  if (cancelledSubmissions.has(message.requestId)) {
+    transitionObserver.disconnect();
+    return;
+  }
   if (isCaptchaChallengePresent()) {
     await emitSubmissionUpdate(message.requestId, "attention", "提交需要前往题目页面输入验证码");
     const captchaResult = await waitForCaptchaCompletion();
@@ -442,6 +459,7 @@ async function watchSubmission(
   try {
     while (Date.now() - startedAt < 10 * 60_000) {
       await delay(750);
+      if (cancelledSubmissions.has(requestId)) return;
       if (transitionObserver?.hasChanged()) sawTransition = true;
       const feedback = readSubmissionFeedback(site);
       if (feedback?.kind === "error" && feedbackKey(feedback) !== baselineFeedbackKey) {

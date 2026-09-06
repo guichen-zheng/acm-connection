@@ -34,6 +34,7 @@ interface PendingBrowserSubmission {
   requestId: string;
   site: Site;
   reportTabId: number;
+  startedAt: number;
 }
 
 interface RetainedLuoguTarget {
@@ -54,6 +55,8 @@ let workspaceReady = false;
 let defaultLanguage: ProblemContext["language"] = "cpp";
 const FETCH_TAB_ID_KEY = "algoSyncFetchTabId";
 const LUOGU_TARGET_KEY_PREFIX = "algoSyncLuoguTarget:";
+const TAB_MESSAGE_TIMEOUT = "algo-sync-tab-message-timeout";
+const PENDING_SUBMISSION_MAX_AGE = 10 * 60_000 + 30_000;
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.alarms.create("algo-sync-reconnect", { periodInMinutes: 0.5 });
@@ -61,11 +64,14 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 chrome.runtime.onStartup.addListener(ensureConnection);
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "algo-sync-reconnect") ensureConnection();
+  if (alarm.name === "algo-sync-reconnect") {
+    expirePendingSubmissions();
+    ensureConnection();
+  }
 });
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "bridge:init" && sender.tab?.id !== undefined) {
-    const pendingSubmission = pendingSubmissions.get(sender.tab.id);
+    const pendingSubmission = currentPendingSubmission(sender.tab.id);
     const token = crypto.randomUUID();
     chrome.scripting.executeScript({
       target: { tabId: sender.tab.id },
@@ -141,7 +147,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "loading" || changeInfo.url) tabs.delete(tabId);
   const updatedUrl = changeInfo.url ?? tab.url;
   if (changeInfo.url && !luoguRecordId(changeInfo.url)) clearLuoguRecord(tabId);
-  if (luoguRecordId(updatedUrl) && pendingSubmissions.get(tabId)?.site === "luogu") {
+  if (luoguRecordId(updatedUrl) && currentPendingSubmission(tabId)?.site === "luogu") {
     void confirmLuoguRecord(tabId, updatedUrl!);
   }
   if (changeInfo.status === "complete" && tab.active) {
@@ -151,7 +157,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     void announceTabContext(tabId);
   }
   if (changeInfo.status === "complete") {
-    const pending = pendingSubmissions.get(tabId);
+    const pending = currentPendingSubmission(tabId);
     if (pending) {
       if (pending.site === "nowcoder") void setNowcoderAcceptedDialogWatcher(tabId, true);
       void chrome.tabs.sendMessage(tabId, {
@@ -256,7 +262,7 @@ function handleWorkspaceMessage(raw: unknown): void {
       return;
     }
     console.info(`[Algo Sync] 正在写入标签 ${message.tabId}：${message.site}/${message.problemId}/${message.language}`);
-    void chrome.tabs.sendMessage(message.tabId, { ...message, type: "applyCode" }).catch((error) => {
+    void sendTabMessageWithTimeout(message.tabId, { ...message, type: "applyCode" }).catch((error) => {
       sendSocket({
         type: "applyResult",
         protocolVersion: PROTOCOL_VERSION,
@@ -269,6 +275,10 @@ function handleWorkspaceMessage(raw: unknown): void {
   }
   if (message.type === "submitCode") {
     void beginSubmission(message);
+    return;
+  }
+  if (message.type === "cancelSubmission") {
+    cancelPendingSubmission(message.tabId, "本地命令已结束，已取消等待评测结果", false, message.requestId);
     return;
   }
   if (message.type === "resetCode") {
@@ -309,18 +319,28 @@ async function beginSubmission(message: SubmitCodeMessage): Promise<void> {
     return;
   }
   const submission = resolved;
-  const previous = pendingSubmissions.get(submission.tabId);
-  if (previous && previous.requestId !== message.requestId) {
+  const previous = currentPendingSubmission(submission.tabId);
+  if (previous?.requestId === message.requestId) {
     sendSocket({
       type: "submissionUpdate",
       protocolVersion: PROTOCOL_VERSION,
       requestId: message.requestId,
       tabId: message.tabId,
-      phase: "error",
-      status: "当前标签页已有一个提交正在等待评测",
-      success: false
+      phase: "submitted",
+      status: "该提交已经在等待评测结果"
     });
     return;
+  }
+  if (previous) {
+    cancelPendingSubmission(submission.tabId, "已被新的提交请求替代", true, previous.requestId);
+    sendSocket({
+      type: "submissionUpdate",
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: message.requestId,
+      tabId: message.tabId,
+      phase: "preparing",
+      status: "检测到上一次遗留的等待状态，已清理并继续本次提交"
+    });
   }
   if (submission.site === "nowcoder") {
     if (!await reloadNowcoderBeforeSubmission(submission)) {
@@ -349,14 +369,45 @@ async function beginSubmission(message: SubmitCodeMessage): Promise<void> {
       return;
     }
   }
+  if (submission.site === "luogu") {
+    try {
+      // A background/sleeping Edge tab can keep sendMessage pending forever.
+      // Probe with a harmless request before sending submitCode so recovery can
+      // never cause the same code to be submitted twice.
+      await sendTabMessageWithTimeout(submission.tabId, { type: "requestContext" }, 1_500);
+    } catch {
+      sendSocket({
+        type: "submissionUpdate",
+        protocolVersion: PROTOCOL_VERSION,
+        requestId: message.requestId,
+        tabId: message.tabId,
+        phase: "preparing",
+        status: "洛谷网页标签无响应，正在后台刷新后重试"
+      });
+      const recovered = await ensureLuoguIdeMode(submission, true);
+      if (!recovered.ok || !await ensureMatchingContext(submission)) {
+        sendSocket({
+          type: "submissionUpdate",
+          protocolVersion: PROTOCOL_VERSION,
+          requestId: message.requestId,
+          tabId: message.tabId,
+          phase: "error",
+          status: "洛谷网页标签在后台刷新后仍未恢复；请检查 Edge 是否启用了节能/睡眠标签页",
+          success: false
+        });
+        return;
+      }
+    }
+  }
   pendingSubmissions.set(submission.tabId, {
     requestId: message.requestId,
     site: submission.site,
-    reportTabId: message.tabId
+    reportTabId: message.tabId,
+    startedAt: Date.now()
   });
   try {
     if (submission.site === "nowcoder") await setNowcoderAcceptedDialogWatcher(submission.tabId, true);
-    await chrome.tabs.sendMessage(submission.tabId, { ...submission, type: "submitCode" });
+    await sendTabMessageWithTimeout(submission.tabId, { ...submission, type: "submitCode" }, 5_000);
   } catch (error) {
     pendingSubmissions.delete(submission.tabId);
     if (submission.site === "nowcoder") void setNowcoderAcceptedDialogWatcher(submission.tabId, false);
@@ -366,7 +417,9 @@ async function beginSubmission(message: SubmitCodeMessage): Promise<void> {
       requestId: message.requestId,
       tabId: message.tabId,
       phase: "error",
-      status: String(error),
+      status: isTabMessageTimeout(error)
+        ? "网页标签在发送提交时失去响应，无法确认是否已提交；为避免重复提交，本次不会自动重试"
+        : error instanceof Error ? error.message : String(error),
       success: false
     });
   }
@@ -618,7 +671,8 @@ async function resetCode(message: ResetCodeMessage): Promise<void> {
 }
 
 async function ensureLuoguIdeMode(
-  message: Pick<ResetCodeMessage, "tabId" | "problemId">
+  message: Pick<ResetCodeMessage, "tabId" | "problemId">,
+  forceReload = false
 ): Promise<{ ok: boolean; changed: boolean }> {
   let tab: chrome.tabs.Tab;
   try {
@@ -628,7 +682,7 @@ async function ensureLuoguIdeMode(
   }
   const ideUrl = luoguIdeUrlForProblem(tab.url, message.problemId);
   if (!ideUrl) return { ok: false, changed: false };
-  const changed = tab.url !== ideUrl || tab.discarded === true;
+  const changed = forceReload || tab.url !== ideUrl || tab.discarded === true;
   if (changed) {
     tabs.delete(message.tabId);
     if (activeTabId === message.tabId) lastSentFingerprint = "";
@@ -668,7 +722,7 @@ async function ensureMatchingContext(
   const expected = problemKey(message);
   if (tabs.get(message.tabId)?.fingerprint === expected) return true;
   try {
-    await chrome.tabs.sendMessage(message.tabId, { type: "requestContext" });
+    await sendTabMessageWithTimeout(message.tabId, { type: "requestContext" }, 1_500);
   } catch {
     return false;
   }
@@ -763,8 +817,17 @@ async function reloadCurrentPage(requestId: string): Promise<void> {
       sendBrowserActionResult(requestId, false, "没有可刷新的活动浏览器标签页");
       return;
     }
+    const cancelledPending = cancelPendingSubmission(
+      tab.id,
+      "浏览器页面已刷新，已取消等待本次评测结果",
+      true
+    );
     await chrome.tabs.reload(tab.id);
-    sendBrowserActionResult(requestId, true, "当前浏览器页面已刷新");
+    sendBrowserActionResult(
+      requestId,
+      true,
+      cancelledPending ? "当前浏览器页面已刷新，并已清除旧的提交等待状态" : "当前浏览器页面已刷新"
+    );
   } catch (error) {
     sendBrowserActionResult(requestId, false, error instanceof Error ? error.message : String(error));
   }
@@ -819,8 +882,11 @@ async function refreshRemoteProblemContexts(): Promise<void> {
 
 async function requestTabContext(tabId: number, injectWhenMissing: boolean): Promise<void> {
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "requestContext" });
-  } catch {
+    await sendTabMessageWithTimeout(tabId, { type: "requestContext" }, 1_500);
+  } catch (error) {
+    // A frozen/sleeping tab can leave sendMessage pending indefinitely. Do not
+    // let one such tab block `acm remote` or target discovery.
+    if (isTabMessageTimeout(error)) return;
     if (!injectWhenMissing) return;
     try {
       await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
@@ -977,6 +1043,76 @@ async function refreshActiveTab(): Promise<void> {
 
 function sendSocket(message: Record<string, unknown>): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+}
+
+function currentPendingSubmission(tabId: number): PendingBrowserSubmission | undefined {
+  const pending = pendingSubmissions.get(tabId);
+  if (!pending) return undefined;
+  if (Date.now() - pending.startedAt <= PENDING_SUBMISSION_MAX_AGE) return pending;
+  cancelPendingSubmission(tabId, "等待评测结果超时，已自动清除提交状态", true, pending.requestId);
+  return undefined;
+}
+
+function expirePendingSubmissions(): void {
+  for (const tabId of pendingSubmissions.keys()) currentPendingSubmission(tabId);
+}
+
+function cancelPendingSubmission(
+  tabId: number,
+  status: string,
+  notifyWorkspace: boolean,
+  expectedRequestId?: string
+): boolean {
+  const pending = pendingSubmissions.get(tabId);
+  if (!pending || (expectedRequestId !== undefined && pending.requestId !== expectedRequestId)) return false;
+  pendingSubmissions.delete(tabId);
+  if (pending.site === "nowcoder") void setNowcoderAcceptedDialogWatcher(tabId, false);
+  void sendTabMessageWithTimeout(tabId, {
+    type: "cancelSubmission",
+    requestId: pending.requestId
+  }, 1_000).catch(() => undefined);
+  if (notifyWorkspace) {
+    sendSocket({
+      type: "submissionUpdate",
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: pending.requestId,
+      tabId: pending.reportTabId,
+      phase: "error",
+      status,
+      success: false
+    });
+  }
+  return true;
+}
+
+function sendTabMessageWithTimeout<T = unknown>(
+  tabId: number,
+  message: unknown,
+  timeoutMilliseconds = 2_500
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(TAB_MESSAGE_TIMEOUT));
+    }, timeoutMilliseconds);
+    void chrome.tabs.sendMessage(tabId, message).then((result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result as T);
+    }, (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function isTabMessageTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message === TAB_MESSAGE_TIMEOUT;
 }
 
 function setBadge(text: string, color: string, title: string): void {

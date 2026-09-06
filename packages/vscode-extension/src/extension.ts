@@ -60,6 +60,7 @@ interface ActiveTarget {
 
 interface PendingCliSubmission {
   socket: WebSocket;
+  browserSocket: WebSocket;
   tabId: number;
   timeout: ReturnType<typeof setTimeout>;
 }
@@ -230,7 +231,7 @@ function attachBrowserSocket(socket: WebSocket, folder: vscode.WorkspaceFolder, 
     const closedTarget = activeTarget?.socket === socket ? activeTarget : undefined;
     if (closedTarget) activeTarget = undefined;
     for (const [requestId, pending] of pendingCliSubmissions) {
-      if (pending.tabId === closedTarget?.tabId) finishCliSubmission(requestId, "error", "浏览器连接已断开", false);
+      if (pending.browserSocket === socket) finishCliSubmission(requestId, "error", "浏览器连接已断开", false);
     }
     browserConnections.delete(socket);
     for (const [requestId, pending] of pendingCliActions) {
@@ -270,6 +271,7 @@ function attachCliSocket(socket: WebSocket, folder: vscode.WorkspaceFolder): voi
   socket.on("close", () => {
     for (const [requestId, pending] of pendingCliSubmissions) {
       if (pending.socket === socket) {
+        cancelBrowserSubmission(requestId, pending);
         clearTimeout(pending.timeout);
         pendingCliSubmissions.delete(requestId);
       }
@@ -312,9 +314,16 @@ async function handleCliPush(socket: WebSocket, message: CliPushMessage, folder:
     return;
   }
   const timeout = setTimeout(() => {
+    const pending = pendingCliSubmissions.get(message.requestId);
+    if (pending) cancelBrowserSubmission(message.requestId, pending);
     finishCliSubmission(message.requestId, "error", "等待浏览器评测结果超时", false);
   }, 10 * 60_000 + 15_000);
-  pendingCliSubmissions.set(message.requestId, { socket, tabId: target.tabId, timeout });
+  pendingCliSubmissions.set(message.requestId, {
+    socket,
+    browserSocket: target.socket,
+    tabId: target.tabId,
+    timeout
+  });
   sendCliUpdate(socket, message.requestId, "preparing", `准备提交 ${path.basename(target.fileUri.fsPath)}`, target);
   send(target.socket, {
     type: "submitCode",
@@ -1035,6 +1044,15 @@ function finishCliSubmission(requestId: string, phase: "finished" | "error", mes
   sendCliUpdate(pending.socket, requestId, phase, message, activeTarget, success);
   clearTimeout(pending.timeout);
   pendingCliSubmissions.delete(requestId);
+}
+
+function cancelBrowserSubmission(requestId: string, pending: PendingCliSubmission): void {
+  send(pending.browserSocket, {
+    type: "cancelSubmission",
+    protocolVersion: PROTOCOL_VERSION,
+    requestId,
+    tabId: pending.tabId
+  });
 }
 
 function sendCliError(socket: WebSocket, code: string, message: string): void {

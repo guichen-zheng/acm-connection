@@ -98,6 +98,13 @@ export interface SubmitCodeMessage {
   code: string;
 }
 
+export interface CancelSubmissionMessage {
+  type: "cancelSubmission";
+  protocolVersion: number;
+  requestId: string;
+  tabId: number;
+}
+
 export interface SubmissionUpdateMessage {
   type: "submissionUpdate";
   protocolVersion: number;
@@ -254,6 +261,7 @@ export type WorkspaceToBrowserMessage =
   | LocalFileReadyMessage
   | SavedCodeMessage
   | SubmitCodeMessage
+  | CancelSubmissionMessage
   | ResetCodeMessage
   | NavigateToProblemMessage
   | ReloadPageMessage
